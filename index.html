@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#15130f">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png">
+<link rel="apple-touch-icon" href="./icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Optical Piano</title>
+<style>
+  :root {
+    --bg: #15130f;
+    --panel: #1e1b16;
+    --panel-2: #262218;
+    --line: #3a352b;
+    --text: #f0ead9;
+    --dim: #9a917d;
+    --amber: #ffb63d;
+    --amber-deep: #8a5a10;
+    --teal: #3fd0a4;
+    --red: #e2635a;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column;
+    max-width: 560px; margin: 0 auto;
+    padding: 12px 12px calc(12px + env(safe-area-inset-bottom));
+    gap: 10px;
+    user-select: none; -webkit-user-select: none;
+  }
+  header { display: flex; align-items: baseline; justify-content: space-between; padding: 2px 2px 0; }
+  h1 { font-size: 17px; font-weight: 700; letter-spacing: 0.06em; }
+  h1 span { color: var(--amber); }
+  #status {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em;
+    padding: 4px 9px; border-radius: 99px; border: 1px solid var(--line); color: var(--dim);
+  }
+  #status.live { color: var(--teal); border-color: var(--teal); }
+  #status.cal  { color: var(--amber); border-color: var(--amber); }
+
+  #stage {
+    position: relative; background: #000; border-radius: 12px; overflow: hidden;
+    border: 1px solid var(--line); aspect-ratio: 4 / 3;
+  }
+  #view { width: 100%; height: 100%; display: block; }
+  #prompt {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px; text-align: center;
+    background: rgba(21,19,15,0.92); padding: 24px;
+  }
+  #prompt p { color: var(--dim); font-size: 14px; line-height: 1.5; max-width: 320px; }
+  #guide {
+    position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 14px;
+    background: linear-gradient(transparent, rgba(0,0,0,0.75));
+    font-size: 14px; line-height: 1.4; min-height: 44px;
+  }
+  #guide b { color: var(--amber); }
+
+  #keys { display: flex; gap: 4px; height: 92px; }
+  .key {
+    flex: 1; position: relative; border-radius: 6px; overflow: hidden;
+    background: var(--panel); border: 1px solid var(--line);
+    display: flex; align-items: flex-end; justify-content: center;
+    transition: border-color 80ms;
+  }
+  .key .fill {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 0%;
+    background: var(--amber-deep); transition: height 60ms linear;
+  }
+  .key.on { border-color: var(--amber); }
+  .key.on .fill { background: var(--amber); }
+  .key .lbl {
+    position: relative; font-family: var(--mono); font-size: 11px;
+    color: var(--dim); padding-bottom: 6px;
+  }
+  .key.on .lbl { color: #241a05; font-weight: 700; }
+  .key.uncal { opacity: 0.35; }
+
+  #controls { display: flex; flex-direction: column; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .row label { font-size: 13px; color: var(--dim); min-width: 84px; }
+  .row output { font-family: var(--mono); font-size: 12px; color: var(--text); min-width: 30px; text-align: right; }
+  input[type=range] { flex: 1; accent-color: var(--amber); height: 28px; }
+  select {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 10px; font-size: 14px;
+  }
+  button {
+    font: inherit; font-weight: 600; border: none; border-radius: 10px;
+    padding: 13px 18px; cursor: pointer; touch-action: manipulation;
+  }
+  .primary { background: var(--amber); color: #241a05; }
+  .primary:active { filter: brightness(0.9); }
+  .ghost { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); padding: 10px 14px; font-weight: 500; font-size: 14px; }
+  .btnrow { display: flex; gap: 8px; }
+  .btnrow .primary { flex: 1; }
+  #err { color: var(--red); font-size: 13px; line-height: 1.4; display: none; padding: 0 2px; }
+  footer { font-size: 11px; color: var(--dim); text-align: center; font-family: var(--mono); }
+</style>
+</head>
+<body>
+<header>
+  <h1>OPTICAL<span>—</span>PIANO</h1>
+  <div id="status">off</div>
+</header>
+
+<div id="stage">
+  <canvas id="view" width="640" height="480"></canvas>
+  <div id="guide"></div>
+  <div id="prompt">
+    <p>Put the phone in the box, camera facing the holes. Tap start, then run calibration once.</p>
+    <button class="primary" id="startBtn">Start camera &amp; sound</button>
+  </div>
+</div>
+
+<div id="keys"></div>
+
+<div id="controls">
+  <div class="row">
+    <label for="numKeys">Keys</label>
+    <select id="numKeys">
+      <option>3</option><option>4</option><option>5</option><option>6</option>
+      <option>7</option><option>8</option><option selected>10</option>
+    </select>
+    <button class="ghost" id="toneBtn" type="button">Test sound</button>
+  </div>
+  <div class="row">
+    <label for="sens">Sensitivity</label>
+    <input type="range" id="sens" min="8" max="60" value="22">
+    <output id="sensOut">22</output>
+  </div>
+  <div class="btnrow">
+    <button class="primary" id="calBtn" disabled>Calibrate</button>
+  </div>
+</div>
+
+<div id="err"></div>
+<footer>keep the room lit · keep the box dark · v0.1 shoebox</footer>
+
+<script>
+"use strict";
+
+/* ---------- constants ---------- */
+const PW = 160, PH = 120;               // processing resolution
+const NAMES = ["C4","D4","E4","F4","G4","A4","B4","C5","D5","E5"];
+const FREQS = [261.63,293.66,329.63,349.23,392.00,440.00,493.88,523.25,587.33,659.25];
+const BLOB_DIFF = 26;                    // per-pixel diff for calibration blobs
+const BLOB_MIN  = 10;                    // min changed pixels to accept a blob
+const EMA_ALPHA = 0.03;                  // baseline drift speed while idle
+
+/* ---------- state ---------- */
+let mode = "idle";                       // idle | baseline | calibrate | play
+let numKeys = 10;
+let zones = [];                          // {x,y,w,h, base, sig, pressed, note, freq, name}
+let calIndex = 0, calHold = 0, calRelease = 0, baseFrames = 0;
+let baselineFrame = new Float32Array(PW * PH);
+let tOn = 22, tOff = 10;
+
+/* ---------- dom ---------- */
+const $ = id => document.getElementById(id);
+const view = $("view"), vctx = view.getContext("2d");
+const proc = document.createElement("canvas"); proc.width = PW; proc.height = PH;
+const pctx = proc.getContext("2d", { willReadFrequently: true });
+const video = document.createElement("video");
+video.playsInline = true; video.muted = true;
+const statusEl = $("status"), guideEl = $("guide"), errEl = $("err");
+
+function setStatus(txt, cls) { statusEl.textContent = txt; statusEl.className = cls || ""; }
+function setGuide(html) { guideEl.innerHTML = html; }
+function showErr(msg) { errEl.style.display = "block"; errEl.textContent = msg; }
+
+/* ---------- audio ---------- */
+let actx = null, master = null;
+const voices = [];
+
+function initAudio() {
+  actx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive" });
+  master = actx.createGain();
+  master.gain.value = 0.5;
+  master.connect(actx.destination);
+}
+function makeVoice(freq) {
+  const g = actx.createGain(); g.gain.value = 0; g.connect(master);
+  const o1 = actx.createOscillator(); o1.type = "triangle"; o1.frequency.value = freq;
+  const o2 = actx.createOscillator(); o2.type = "sine"; o2.frequency.value = freq * 2.001;
+  const g2 = actx.createGain(); g2.gain.value = 0.25;
+  o1.connect(g); o2.connect(g2); g2.connect(g);
+  o1.start(); o2.start();
+  return { g };
+}
+function noteOn(i) {
+  const v = voices[i]; if (!v) return;
+  const t = actx.currentTime;
+  v.g.gain.cancelScheduledValues(t);
+  v.g.gain.setValueAtTime(v.g.gain.value, t);
+  v.g.gain.linearRampToValueAtTime(0.9 / Math.max(3, numKeys) * 3, t + 0.01);
+}
+function noteOff(i) {
+  const v = voices[i]; if (!v) return;
+  const t = actx.currentTime;
+  v.g.gain.cancelScheduledValues(t);
+  v.g.gain.setValueAtTime(v.g.gain.value, t);
+  v.g.gain.exponentialRampToValueAtTime(0.0008, t + 0.3);
+  v.g.gain.setValueAtTime(0, t + 0.32);
+}
+function blip(i, dur = 0.25) { noteOn(i); setTimeout(() => noteOff(i), dur * 1000); }
+function rebuildVoices() {
+  voices.length = 0;
+  for (let i = 0; i < numKeys; i++) voices.push(makeVoice(FREQS[i]));
+}
+
+/* ---------- key strip ---------- */
+const keysEl = $("keys");
+let keyEls = [];
+function buildKeyStrip() {
+  keysEl.innerHTML = "";
+  keyEls = [];
+  for (let i = 0; i < numKeys; i++) {
+    const k = document.createElement("div");
+    k.className = "key uncal";
+    k.innerHTML = `<div class="fill"></div><div class="lbl">${NAMES[i]}</div>`;
+    k.addEventListener("pointerdown", () => { if (actx) blip(i); });
+    keysEl.appendChild(k);
+    keyEls.push(k);
+  }
+}
+
+/* ---------- camera ---------- */
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showErr("Camera API unavailable. Open this page over HTTPS (e.g. a Netlify or GitHub Pages link) — camera access is blocked on plain file:// or http://.");
+    return false;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } }
+    });
+    video.srcObject = stream;
+    await video.play();
+    const track = stream.getVideoTracks()[0];
+    try { // best-effort exposure lock; unsupported browsers just ignore it
+      const caps = track.getCapabilities ? track.getCapabilities() : {};
+      if (caps.exposureMode && caps.exposureMode.includes("manual")) {
+        await track.applyConstraints({ advanced: [{ exposureMode: "manual" }] });
+      }
+    } catch (_) {}
+    return true;
+  } catch (e) {
+    showErr("Camera permission denied or unavailable: " + e.message);
+    return false;
+  }
+}
+async function keepAwake() {
+  try { if ("wakeLock" in navigator) await navigator.wakeLock.request("screen"); } catch (_) {}
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) keepAwake(); });
+
+/* ---------- pixel helpers ---------- */
+function grabFrame() {
+  pctx.drawImage(video, 0, 0, PW, PH);
+  return pctx.getImageData(0, 0, PW, PH).data;
+}
+function lumaAt(d, p) { const q = p * 4; return (2 * d[q] + 5 * d[q + 1] + d[q + 2]) >> 3; }
+function zoneLuma(d, z) {
+  let sum = 0, n = 0;
+  for (let y = z.y; y < z.y + z.h; y++)
+    for (let x = z.x; x < z.x + z.w; x++) { sum += lumaAt(d, y * PW + x); n++; }
+  return n ? sum / n : 0;
+}
+
+/* ---------- calibration ---------- */
+function startCalibration() {
+  zones = [];
+  calIndex = 0; baseFrames = 0;
+  baselineFrame.fill(0);
+  mode = "baseline";
+  setStatus("calibrating", "cal");
+  keyEls.forEach(k => k.className = "key uncal");
+  setGuide("Hold still — learning the dark box…");
+}
+function calibrationStep(d) {
+  if (mode === "baseline") {
+    for (let p = 0; p < PW * PH; p++) baselineFrame[p] += lumaAt(d, p);
+    if (++baseFrames >= 30) {
+      for (let p = 0; p < PW * PH; p++) baselineFrame[p] /= 30;
+      mode = "calibrate"; calHold = 0; calRelease = 0;
+      setGuide(`Press key <b>1</b> and hold briefly.`);
+    }
+    return;
+  }
+  // find blob of brightened pixels
+  let minx = PW, miny = PH, maxx = -1, maxy = -1, count = 0;
+  for (let y = 0; y < PH; y++) for (let x = 0; x < PW; x++) {
+    const p = y * PW + x;
+    if (lumaAt(d, p) - baselineFrame[p] > BLOB_DIFF) {
+      count++;
+      if (x < minx) minx = x; if (x > maxx) maxx = x;
+      if (y < miny) miny = y; if (y > maxy) maxy = y;
+    }
+  }
+  if (calRelease > 0) {                        // waiting for previous key to close
+    if (count < BLOB_MIN / 2 && ++calHold >= 4) {
+      calRelease = 0; calHold = 0;
+      if (calIndex >= numKeys) { enterPlay(); return; }
+      setGuide(`Press key <b>${calIndex + 1}</b> and hold briefly.`);
+    } else if (count >= BLOB_MIN) calHold = 0;
+    return;
+  }
+  if (count >= BLOB_MIN) {
+    if (++calHold >= 3) {                      // stable for 3 frames -> register
+      const pad = 2;
+      const z = {
+        x: Math.max(0, minx - pad), y: Math.max(0, miny - pad),
+        w: Math.min(PW - 1, maxx + pad) - Math.max(0, minx - pad) + 1,
+        h: Math.min(PH - 1, maxy + pad) - Math.max(0, miny - pad) + 1,
+        base: 0, sig: 0, pressed: false,
+        note: calIndex, freq: FREQS[calIndex], name: NAMES[calIndex]
+      };
+      const cx = z.x + z.w / 2, cy = z.y + z.h / 2;
+      const dup = zones.some(o => cx >= o.x && cx <= o.x + o.w && cy >= o.y && cy <= o.y + o.h);
+      if (!dup) {
+        zones.push(z);
+        keyEls[calIndex].classList.remove("uncal");
+        blip(calIndex);
+        calIndex++; calHold = 0; calRelease = 1;
+        setGuide(calIndex >= numKeys
+          ? `Release — all <b>${numKeys}</b> keys learned!`
+          : `Got it. Release key <b>${calIndex}</b>…`);
+      } else { calHold = 0; }
+    }
+  } else calHold = 0;
+}
+function enterPlay() {
+  mode = "play";
+  setStatus("live", "live");
+  setGuide(`Play! Chords work too. Recalibrate if the phone moves.`);
+  const d = grabFrame();
+  zones.forEach(z => { z.base = zoneLuma(d, z); z.pressed = false; });
+}
+
+/* ---------- play-mode detection ---------- */
+function playStep(d) {
+  for (const z of zones) {
+    const l = zoneLuma(d, z);
+    z.sig = l - z.base;
+    if (!z.pressed) {
+      z.base += EMA_ALPHA * (l - z.base);      // drift-compensating baseline, frozen while pressed
+      if (z.sig > tOn)  { z.pressed = true;  noteOn(z.note); }
+    } else if (z.sig < tOff) { z.pressed = false; noteOff(z.note); }
+    const k = keyEls[z.note];
+    if (k) {
+      k.classList.toggle("on", z.pressed);
+      k.querySelector(".fill").style.height =
+        Math.max(0, Math.min(100, (z.sig / tOn) * 100)) + "%";
+    }
+  }
+}
+
+/* ---------- render ---------- */
+function render() {
+  vctx.drawImage(video, 0, 0, view.width, view.height);
+  const sx = view.width / PW, sy = view.height / PH;
+  vctx.lineWidth = 2; vctx.font = "bold 15px ui-monospace, monospace";
+  for (const z of zones) {
+    vctx.strokeStyle = z.pressed ? "#ffb63d" : "rgba(240,234,217,0.45)";
+    vctx.strokeRect(z.x * sx, z.y * sy, z.w * sx, z.h * sy);
+    vctx.fillStyle = z.pressed ? "#ffb63d" : "rgba(240,234,217,0.7)";
+    vctx.fillText(z.name, z.x * sx + 3, z.y * sy - 4);
+  }
+}
+
+/* ---------- main loop ---------- */
+function loop() {
+  if (video.readyState >= 2) {
+    const d = grabFrame();
+    if (mode === "baseline" || mode === "calibrate") calibrationStep(d);
+    else if (mode === "play") playStep(d);
+    render();
+  }
+  if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(loop);
+  else requestAnimationFrame(loop);
+}
+
+/* ---------- wiring ---------- */
+$("startBtn").addEventListener("click", async () => {
+  initAudio();
+  await actx.resume();
+  rebuildVoices();
+  const ok = await startCamera();
+  if (!ok) return;
+  $("prompt").style.display = "none";
+  $("calBtn").disabled = false;
+  keepAwake();
+  setStatus("camera on");
+  setGuide(`Aim at the holes, then tap <b>Calibrate</b>.`);
+  loop();
+});
+$("calBtn").addEventListener("click", startCalibration);
+$("toneBtn").addEventListener("click", () => {
+  if (!actx) return;
+  [0, 2, 4].forEach((n, j) => setTimeout(() => blip(Math.min(n, numKeys - 1), 0.2), j * 160));
+});
+$("numKeys").addEventListener("change", e => {
+  numKeys = +e.target.value;
+  buildKeyStrip();
+  if (actx) rebuildVoices();
+  zones = [];
+  if (mode === "play" || mode === "calibrate" || mode === "baseline") {
+    mode = "idle"; setStatus("camera on");
+    setGuide(`Key count changed — tap <b>Calibrate</b> again.`);
+  }
+});
+$("sens").addEventListener("input", e => {
+  tOn = +e.target.value; tOff = Math.round(tOn * 0.45);
+  $("sensOut").textContent = tOn;
+});
+
+buildKeyStrip();
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("./sw.js").catch(() => {});
+}
+</script>
+</body>
+</html>
