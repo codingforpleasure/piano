@@ -116,7 +116,7 @@
   <canvas id="view" width="640" height="480"></canvas>
   <div id="guide"></div>
   <div id="prompt">
-    <p>Put the phone in the box, camera facing the holes. Tap start, then run calibration once.</p>
+    <p>Tap start, then close the phone in the box (camera facing the holes). Calibration begins automatically after a 10-second countdown.</p>
     <button class="primary" id="startBtn">Start camera &amp; sound</button>
   </div>
 </div>
@@ -218,6 +218,24 @@ function noteOff(i) {
   v.g.gain.setValueAtTime(0, t + 0.32);
 }
 function blip(i, dur = 0.25) { noteOn(i); setTimeout(() => noteOff(i), dur * 1000); }
+// Short UI beep, independent of the piano voices (used by the countdown).
+function beep(freq = 880, dur = 0.08, vol = 0.3) {
+  if (!actx) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(); o.type = "square"; o.frequency.value = freq;
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(vol, t + 0.005);
+  g.gain.exponentialRampToValueAtTime(0.0008, t + dur);
+  o.connect(g); g.connect(master);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+// Distinct rising cue: the countdown finished, calibration is starting now.
+function beepStart() {
+  beep(660, 0.1);
+  setTimeout(() => beep(990, 0.1), 120);
+  setTimeout(() => beep(1320, 0.18), 240);
+}
 function rebuildVoices() {
   voices.length = 0;
   for (let i = 0; i < numKeys; i++) voices.push(makeVoice(FREQS[i]));
@@ -288,6 +306,28 @@ function startCalibration() {
   setStatus("calibrating", "cal");
   keyEls.forEach(k => k.className = "key uncal");
   setGuide("Hold still — learning the dark box…");
+}
+
+/* Auto-calibrate countdown: gives you time to close the phone in the box. */
+let countdownTimer = null;
+function cancelCountdown() {
+  if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+}
+function startCountdown(secs = 10) {
+  cancelCountdown();
+  let left = secs;
+  const tick = () => {
+    setGuide(`Close the phone in the box — calibrating in <b>${left}</b>s…`);
+    beep(left <= 3 ? 1320 : 880, 0.07);    // higher, more urgent in the final 3 seconds
+  };
+  setStatus("closing…", "cal");
+  tick();
+  countdownTimer = setInterval(() => {
+    if (--left > 0) { tick(); return; }
+    cancelCountdown();
+    beepStart();                           // audible "starting now" cue
+    startCalibration();                    // box is dark by now → baseline learns correctly
+  }, 1000);
 }
 function calibrationStep(d) {
   if (mode === "baseline") {
@@ -402,11 +442,10 @@ $("startBtn").addEventListener("click", async () => {
   $("prompt").style.display = "none";
   $("calBtn").disabled = false;
   keepAwake();
-  setStatus("camera on");
-  setGuide(`Aim at the holes, then tap <b>Calibrate</b>.`);
   loop();
+  startCountdown(10);                       // close the box now; auto-calibrates at 0
 });
-$("calBtn").addEventListener("click", startCalibration);
+$("calBtn").addEventListener("click", () => { cancelCountdown(); startCalibration(); });
 $("toneBtn").addEventListener("click", () => {
   if (!actx) return;
   [0, 2, 4].forEach((n, j) => setTimeout(() => blip(Math.min(n, numKeys - 1), 0.2), j * 160));
@@ -416,6 +455,7 @@ $("numKeys").addEventListener("change", e => {
   buildKeyStrip();
   if (actx) rebuildVoices();
   zones = [];
+  cancelCountdown();
   if (mode === "play" || mode === "calibrate" || mode === "baseline") {
     mode = "idle"; setStatus("camera on");
     setGuide(`Key count changed — tap <b>Calibrate</b> again.`);
