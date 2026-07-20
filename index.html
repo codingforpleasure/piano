@@ -83,6 +83,11 @@
   }
   .key.on .lbl { color: #241a05; font-weight: 700; }
   .key.uncal { opacity: 0.35; }
+  .key.hit::after {
+    content: ""; position: absolute; top: 4px; right: 4px;
+    width: 7px; height: 7px; border-radius: 50%; background: var(--teal);
+  }
+  .key.hit .lbl { color: var(--teal); }
 
   #controls { display: flex; flex-direction: column; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
   .row { display: flex; align-items: center; gap: 10px; }
@@ -116,7 +121,7 @@
   <canvas id="view" width="640" height="480"></canvas>
   <div id="guide"></div>
   <div id="prompt">
-    <p>Tap start, then close the phone in the box (camera facing the holes). Calibration begins automatically after a 10-second countdown.</p>
+    <p>Tap start, then tap Calibrate and close the phone in the box (camera facing the holes). Calibration begins after a 10-second countdown.</p>
     <button class="primary" id="startBtn">Start camera &amp; sound</button>
   </div>
 </div>
@@ -134,8 +139,8 @@
   </div>
   <div class="row">
     <label for="sens">Sensitivity</label>
-    <input type="range" id="sens" min="8" max="60" value="22">
-    <output id="sensOut">22</output>
+    <input type="range" id="sens" min="8" max="60" value="46">
+    <output id="sensOut">46</output>
   </div>
   <div class="btnrow">
     <button class="primary" id="calBtn" disabled>Calibrate</button>
@@ -161,6 +166,7 @@ const FREQS = [261.63,293.66,329.63,349.23,392.00,440.00,493.88,523.25,587.33,65
 const BLOB_DIFF = 26;                    // per-pixel diff for calibration blobs
 const BLOB_MIN  = 10;                    // min changed pixels to accept a blob
 const EMA_ALPHA = 0.03;                  // baseline drift speed while idle
+const REMOVE_DELTA = 40;                 // whole-frame brightening that means "lifted out of the box"
 
 /* ---------- 2. state ---------- */
 let mode = "idle";                       // idle | baseline | calibrate | play
@@ -169,6 +175,8 @@ let zones = [];                          // {x,y,w,h, base, sig, pressed, note, 
 let calIndex = 0, calHold = 0, calRelease = 0, baseFrames = 0;
 let baselineFrame = new Float32Array(PW * PH);
 let tOn = 22, tOff = 10;
+let reachedOrder = [];                    // note indices reached this session, in order
+let darkMean = 0;                         // mean frame luma inside the closed box (removal reference)
 
 /* ---------- 3. dom ---------- */
 const $ = id => document.getElementById(id);
@@ -296,10 +304,16 @@ function zoneLuma(d, z) {
     for (let x = z.x; x < z.x + z.w; x++) { sum += lumaAt(d, y * PW + x); n++; }
   return n ? sum / n : 0;
 }
+function frameMeanLuma(d) {
+  let sum = 0; const N = PW * PH;
+  for (let p = 0; p < N; p++) sum += lumaAt(d, p);
+  return sum / N;
+}
 
 /* ---------- 8. calibration ---------- */
 function startCalibration() {
   zones = [];
+  reachedOrder = [];
   calIndex = 0; baseFrames = 0;
   baselineFrame.fill(0);
   mode = "baseline";
@@ -384,19 +398,44 @@ function calibrationStep(d) {
 function enterPlay() {
   mode = "play";
   setStatus("live", "live");
-  setGuide(`Play! Chords work too. Recalibrate if the phone moves.`);
+  setGuide(`Play! Lift the phone out of the box to see which keys were reached.`);
   const d = grabFrame();
   zones.forEach(z => { z.base = zoneLuma(d, z); z.pressed = false; });
+  darkMean = frameMeanLuma(d);              // brightness reference of the closed, dark box
+  clearReached();
+}
+
+/* Latch a key as "reached" (persists until the next calibration). */
+function recordReached(note) {
+  if (reachedOrder.includes(note)) return;
+  reachedOrder.push(note);
+  keyEls[note]?.classList.add("hit");
+}
+function clearReached() {
+  reachedOrder = [];
+  keyEls.forEach(k => k.classList.remove("hit"));
+}
+
+/* Phone lifted out of the box: freeze so the flood of light can't overwrite the
+   record, silence everything, and show which keys were reached. */
+function handleRemoval() {
+  mode = "removed";
+  zones.forEach(z => { if (z.pressed) noteOff(z.note); z.pressed = false; });
+  keyEls.forEach(k => { k.classList.remove("on"); const f = k.querySelector(".fill"); if (f) f.style.height = "0%"; });
+  setStatus("out of box");
+  const list = reachedOrder.length ? reachedOrder.map(n => NAMES[n]).join(" → ") : "none";
+  setGuide(`Out of the box — keys reached: <b>${list}</b>. Tap <b>Calibrate</b> to run again.`);
 }
 
 /* ---------- 9. play-mode detection ---------- */
 function playStep(d) {
+  if (frameMeanLuma(d) > darkMean + REMOVE_DELTA) { handleRemoval(); return; }  // lifted out
   for (const z of zones) {
     const l = zoneLuma(d, z);
     z.sig = l - z.base;
     if (!z.pressed) {
       z.base += EMA_ALPHA * (l - z.base);      // drift-compensating baseline, frozen while pressed
-      if (z.sig > tOn)  { z.pressed = true;  noteOn(z.note); }
+      if (z.sig > tOn)  { z.pressed = true;  noteOn(z.note); recordReached(z.note); }
     } else if (z.sig < tOff) { z.pressed = false; noteOff(z.note); }
     const k = keyEls[z.note];
     if (k) {
@@ -442,10 +481,11 @@ $("startBtn").addEventListener("click", async () => {
   $("prompt").style.display = "none";
   $("calBtn").disabled = false;
   keepAwake();
+  setStatus("camera on");
+  setGuide(`Tap <b>Calibrate</b> to start the 10-second countdown, then close the box.`);
   loop();
-  startCountdown(10);                       // close the box now; auto-calibrates at 0
 });
-$("calBtn").addEventListener("click", () => { cancelCountdown(); startCalibration(); });
+$("calBtn").addEventListener("click", () => startCountdown(10));   // countdown → auto-calibrates at 0
 $("toneBtn").addEventListener("click", () => {
   if (!actx) return;
   [0, 2, 4].forEach((n, j) => setTimeout(() => blip(Math.min(n, numKeys - 1), 0.2), j * 160));
@@ -462,8 +502,11 @@ $("numKeys").addEventListener("change", e => {
   }
 });
 $("sens").addEventListener("input", e => {
-  tOn = +e.target.value; tOff = Math.round(tOn * 0.45);
-  $("sensOut").textContent = tOn;
+  // Slider reads as sensitivity (right = more sensitive), but the detector wants a
+  // threshold (lower = more sensitive), so invert: tOn = min+max - value = 68 - value.
+  const sens = +e.target.value;
+  tOn = 68 - sens; tOff = Math.round(tOn * 0.45);
+  $("sensOut").textContent = sens;
 });
 
 buildKeyStrip();
