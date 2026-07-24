@@ -108,6 +108,19 @@
   .btnrow { display: flex; gap: 8px; }
   .btnrow .primary { flex: 1; }
   #err { color: var(--red); font-size: 13px; line-height: 1.4; display: none; padding: 0 2px; }
+
+  #capture { display: none; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  #capture h2 { font-size: 13px; color: var(--dim); font-weight: 600; letter-spacing: 0.04em; margin-bottom: 8px; }
+  #shots { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+  #shots a { position: relative; display: block; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
+  #shots img { width: 100%; height: auto; display: block; }
+  #shots span { position: absolute; top: 2px; left: 4px; font: 700 10px var(--mono); color: var(--amber); text-shadow: 0 0 3px #000; }
+  #clip { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  #clip video { width: 100%; border-radius: 8px; background: #000; }
+  #capture .save { align-self: flex-start; background: var(--amber); color: #241a05; font-weight: 600; text-decoration: none; border: none; cursor: pointer; border-radius: 8px; padding: 8px 14px; font-size: 13px; }
+  #saveAll { display: inline-block; margin-bottom: 10px; }
+  #capture .hint { font-size: 11px; color: var(--dim); margin-top: 8px; }
+
   footer { font-size: 11px; color: var(--dim); text-align: center; font-family: var(--mono); }
 </style>
 </head>
@@ -148,6 +161,7 @@
 </div>
 
 <div id="err"></div>
+<div id="capture"></div>
 <footer>keep the room lit · keep the box dark · v0.1 shoebox</footer>
 
 <script>
@@ -341,6 +355,7 @@ function startCountdown(secs = 10) {
     cancelCountdown();
     beepStart();                           // audible "starting now" cue
     startCalibration();                    // box is dark by now → baseline learns correctly
+    startCapture();                        // photos every second + footage, through calibration
   }, 1000);
 }
 function calibrationStep(d) {
@@ -425,6 +440,148 @@ function handleRemoval() {
   setStatus("out of box");
   const list = reachedOrder.length ? reachedOrder.map(n => NAMES[n]).join(" → ") : "none";
   setGuide(`Out of the box — keys reached: <b>${list}</b>. Tap <b>Calibrate</b> to run again.`);
+}
+
+/* ---------- 8b. diagnostic capture (photos + video during calibration) ---------- */
+const CAP_SECONDS = 15;
+const shot = document.createElement("canvas");
+const shotCtx = shot.getContext("2d");
+let capTimer = null, capShots = 0, recorder = null, recChunks = [];
+const photos = [];                                 // { name, data:Uint8Array } for the zip
+
+function startCapture() {
+  // stop anything already running, reset the gallery
+  if (capTimer) clearInterval(capTimer);
+  stopRecording();
+  capShots = 0;
+  photos.length = 0;
+  const gal = $("capture");
+  gal.style.display = "block";
+  gal.innerHTML = `<h2>CAPTURE — ${CAP_SECONDS} photos + footage</h2>` +
+    `<button id="saveAll" class="save" type="button">Save all photos (.zip)</button>` +
+    `<div id="shots"></div>`;
+  $("saveAll").addEventListener("click", saveAllPhotos);
+
+  captureFrame();                                  // first photo at t=0
+  capTimer = setInterval(() => {
+    captureFrame();
+    if (++capShots >= CAP_SECONDS - 1) { clearInterval(capTimer); capTimer = null; }
+  }, 1000);
+
+  startRecording();
+  setTimeout(stopRecording, CAP_SECONDS * 1000);
+}
+
+function captureFrame() {
+  const w = video.videoWidth || 640, h = video.videoHeight || 480;
+  shot.width = w; shot.height = h;
+  shotCtx.drawImage(video, 0, 0, w, h);            // full-res, exactly what the camera sees
+  const url = shot.toDataURL("image/jpeg", 0.85);
+  const n = document.querySelectorAll("#shots a").length + 1;
+  const name = `frame-${String(n).padStart(2, "0")}.jpg`;
+  photos.push({ name, data: dataUrlToBytes(url) });
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  a.title = `Photo ${n} — tap to save`;
+  a.innerHTML = `<img src="${url}" alt="frame ${n}"><span>${n}</span>`;
+  $("shots").appendChild(a);
+}
+
+/* Save every captured photo as one .zip (store method — JPEGs are already compressed).
+   Built by hand so there's no external dependency and it works offline. */
+function saveAllPhotos() {
+  if (!photos.length) return;
+  const blob = new Blob([buildZip(photos)], { type: "application/zip" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "box-photos.zip";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function dataUrlToBytes(url) {
+  const bin = atob(url.split(",")[1]);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function buildZip(files) {
+  const u16 = v => new Uint8Array([v & 255, (v >> 8) & 255]);
+  const u32 = v => new Uint8Array([v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >>> 24) & 255]);
+  const cat = arrs => {
+    let len = 0; for (const a of arrs) len += a.length;
+    const out = new Uint8Array(len);
+    let p = 0; for (const a of arrs) { out.set(a, p); p += a.length; }
+    return out;
+  };
+  const enc = new TextEncoder();
+  const DOS_TIME = 0, DOS_DATE = ((2024 - 1980) << 9) | (1 << 5) | 1;   // valid stamp (2024-01-01)
+  const locals = [], central = [];
+  let offset = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name), data = f.data, crc = crc32(data);
+    const local = cat([
+      u32(0x04034b50), u16(20), u16(0), u16(0), u16(DOS_TIME), u16(DOS_DATE),
+      u32(crc), u32(data.length), u32(data.length), u16(name.length), u16(0), name, data
+    ]);
+    central.push(cat([
+      u32(0x02014b50), u16(20), u16(20), u16(0), u16(0), u16(DOS_TIME), u16(DOS_DATE),
+      u32(crc), u32(data.length), u32(data.length),
+      u16(name.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset), name
+    ]));
+    locals.push(local);
+    offset += local.length;
+  }
+  const cd = cat(central);
+  const end = cat([
+    u32(0x06054b50), u16(0), u16(0), u16(files.length), u16(files.length),
+    u32(cd.length), u32(offset), u16(0)
+  ]);
+  return cat([...locals, cd, end]);
+}
+
+function startRecording() {
+  recChunks = [];
+  const stream = video.srcObject;
+  if (!stream || typeof MediaRecorder === "undefined") return;   // video is best-effort
+  try {
+    recorder = new MediaRecorder(stream, pickMime());
+    recorder.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
+    recorder.onstop = finishRecording;
+    recorder.start();
+  } catch (_) { recorder = null; }
+}
+function pickMime() {
+  const types = ["video/mp4", "video/webm;codecs=vp9", "video/webm"];
+  for (const t of types) if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return { mimeType: t };
+  return {};
+}
+function stopRecording() { if (recorder && recorder.state !== "inactive") recorder.stop(); }
+function finishRecording() {
+  if (!recChunks.length) return;
+  const blob = new Blob(recChunks, { type: recChunks[0].type || "video/webm" });
+  const url = URL.createObjectURL(blob);
+  const ext = blob.type.includes("mp4") ? "mp4" : "webm";
+  const wrap = document.createElement("div");
+  wrap.id = "clip";
+  wrap.innerHTML =
+    `<video src="${url}" controls playsinline></video>` +
+    `<a class="save" href="${url}" download="box-footage.${ext}">Save video</a>` +
+    `<div class="hint">Tap any photo above to save it. Photos + video captured during calibration.</div>`;
+  $("capture").appendChild(wrap);
 }
 
 /* ---------- 9. play-mode detection ---------- */
