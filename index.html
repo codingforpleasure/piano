@@ -57,6 +57,7 @@
     background: rgba(21,19,15,0.92); padding: 24px;
   }
   #prompt p { color: var(--dim); font-size: 14px; line-height: 1.5; max-width: 320px; }
+  #prompt .camPick { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim); }
   #guide {
     position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 14px;
     background: linear-gradient(transparent, rgba(0,0,0,0.75));
@@ -135,6 +136,12 @@
   <div id="guide"></div>
   <div id="prompt">
     <p>Tap start, then tap Calibrate and close the phone in the box (camera facing the holes). Calibration begins after a 10-second countdown.</p>
+    <label class="camPick">Camera
+      <select id="facing">
+        <option value="environment" selected>Back camera</option>
+        <option value="user">Front camera</option>
+      </select>
+    </label>
     <button class="primary" id="startBtn">Start camera &amp; sound</button>
   </div>
 </div>
@@ -288,7 +295,7 @@ async function startCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } }
+      video: { facingMode: $("facing").value, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } }
     });
     video.srcObject = stream;
     await video.play();
