@@ -46,6 +46,16 @@
   #status.live { color: var(--teal); border-color: var(--teal); }
   #status.cal  { color: var(--amber); border-color: var(--amber); }
 
+  #tabs { display: flex; gap: 6px; }
+  #tabs .tab {
+    flex: 1; background: var(--panel); color: var(--dim);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px;
+    font-weight: 600; font-size: 14px;
+  }
+  #tabs .tab.active { background: var(--panel-2); color: var(--amber); border-color: var(--amber); }
+  .panel { display: flex; flex-direction: column; gap: 10px; }
+  .panel[hidden] { display: none; }
+
   #stage {
     position: relative; background: #000; border-radius: 12px; overflow: hidden;
     border: 1px solid var(--line); aspect-ratio: 4 / 3;
@@ -57,8 +67,8 @@
     background: rgba(21,19,15,0.92); padding: 24px;
   }
   #prompt p { color: var(--dim); font-size: 14px; line-height: 1.5; max-width: 320px; }
-  #prompt .camPick { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim); }
-  #prompt .camNote { font-size: 12px; color: var(--dim); min-height: 15px; max-width: 320px; line-height: 1.4; }
+  .camNote { font-size: 12px; color: var(--dim); min-height: 15px; line-height: 1.4; }
+  .camNote:empty { display: none; }
   #guide {
     position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 14px;
     background: linear-gradient(transparent, rgba(0,0,0,0.75));
@@ -91,7 +101,7 @@
   }
   .key.hit .lbl { color: var(--teal); }
 
-  #controls { display: flex; flex-direction: column; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  #controls, .controls { display: flex; flex-direction: column; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
   .row { display: flex; align-items: center; gap: 10px; }
   .row label { font-size: 13px; color: var(--dim); min-width: 84px; }
   .row output { font-family: var(--mono); font-size: 12px; color: var(--text); min-width: 30px; text-align: right; }
@@ -132,46 +142,63 @@
   <div id="status">off</div>
 </header>
 
-<div id="stage">
-  <canvas id="view" width="640" height="480"></canvas>
-  <div id="guide"></div>
-  <div id="prompt">
-    <p>Tap start, then tap Calibrate and close the phone in the box (camera facing the holes). Calibration begins after a 10-second countdown.</p>
-    <label class="camPick">Camera
+<nav id="tabs">
+  <button class="tab active" data-tab="play" type="button">Play</button>
+  <button class="tab" data-tab="notes" type="button">Notes</button>
+</nav>
+
+<section id="tab-play" class="panel">
+  <div class="controls">
+    <div class="row">
+      <label for="facing">Camera</label>
       <select id="facing">
-        <option value="environment" selected>Back camera</option>
-        <option value="user">Front camera</option>
+        <option value="environment">Back camera</option>
+        <option value="user" selected>Front camera</option>
       </select>
-    </label>
-    <button class="ghost" id="detectBtn" type="button">Detect ultra-wide</button>
+      <button class="ghost" id="detectBtn" type="button">Detect ultra-wide</button>
+    </div>
     <div id="camNote" class="camNote"></div>
-    <button class="primary" id="startBtn">Start camera &amp; sound</button>
   </div>
-</div>
 
-<div id="keys"></div>
+  <div id="stage">
+    <canvas id="view" width="640" height="480"></canvas>
+    <div id="guide"></div>
+    <div id="prompt">
+      <p>Tap start, then tap Calibrate and close the phone in the box (camera facing the holes). Calibration begins after a 10-second countdown.</p>
+      <button class="primary" id="startBtn">Start camera &amp; sound</button>
+    </div>
+  </div>
 
-<div id="controls">
-  <div class="row">
-    <label for="numKeys">Keys</label>
-    <select id="numKeys">
-      <option>3</option><option>4</option><option>5</option><option>6</option>
-      <option>7</option><option>8</option><option selected>10</option>
-    </select>
-    <button class="ghost" id="toneBtn" type="button">Test sound</button>
+  <div id="controls">
+    <div class="row">
+      <label for="sens">Sensitivity</label>
+      <input type="range" id="sens" min="8" max="60" value="46">
+      <output id="sensOut">46</output>
+    </div>
+    <div class="btnrow">
+      <button class="primary" id="calBtn" disabled>Calibrate</button>
+      <button class="primary" id="shotBtn" disabled>Take shot</button>
+    </div>
   </div>
-  <div class="row">
-    <label for="sens">Sensitivity</label>
-    <input type="range" id="sens" min="8" max="60" value="46">
-    <output id="sensOut">46</output>
-  </div>
-  <div class="btnrow">
-    <button class="primary" id="calBtn" disabled>Calibrate</button>
-  </div>
-</div>
 
-<div id="err"></div>
-<div id="capture"></div>
+  <div id="err"></div>
+  <div id="capture"></div>
+</section>
+
+<section id="tab-notes" class="panel" hidden>
+  <div id="keys"></div>
+  <div class="controls">
+    <div class="row">
+      <label for="numKeys">Keys</label>
+      <select id="numKeys">
+        <option>3</option><option>4</option><option>5</option><option>6</option>
+        <option>7</option><option>8</option><option selected>10</option>
+      </select>
+      <button class="ghost" id="toneBtn" type="button">Test sound</button>
+    </div>
+  </div>
+</section>
+
 <footer>keep the room lit · keep the box dark · v0.1 shoebox</footer>
 
 <script>
@@ -290,12 +317,19 @@ function buildKeyStrip() {
 }
 
 /* ---------- 6. camera ---------- */
+let cameraOn = false;
+function stopStream() {
+  const s = video.srcObject;
+  if (s) s.getTracks().forEach(t => t.stop());
+  video.srcObject = null;
+}
 async function startCamera() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     showErr("Camera API unavailable. Open this page over HTTPS (e.g. a Netlify or GitHub Pages link) — camera access is blocked on plain file:// or http://.");
     return false;
   }
   try {
+    stopStream();                                  // release any current camera before switching
     const sel = $("facing").value;
     // "environment"/"user" → pick by facing; anything else is a specific deviceId (e.g. ultra-wide).
     const base = { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } };
@@ -308,6 +342,7 @@ async function startCamera() {
     // Note: no manual exposure lock — locking to "manual" without an exposureTime
     // blacks the image out instantly on many devices. Auto-exposure is fine for a
     // stable box; the drift-compensating baseline (EMA_ALPHA) absorbs slow changes.
+    cameraOn = true;
     return true;
   } catch (e) {
     showErr("Camera permission denied or unavailable: " + e.message);
@@ -494,19 +529,22 @@ const shotCtx = shot.getContext("2d");
 let capTimer = null, capShots = 0, recorder = null, recChunks = [];
 const photos = [];                                 // { name, data:Uint8Array } for the zip
 
-function startCapture() {
-  // stop anything already running, reset the gallery
-  if (capTimer) clearInterval(capTimer);
+// Reset the gallery panel and return it ready for fresh shots.
+function resetGallery(title) {
+  if (capTimer) { clearInterval(capTimer); capTimer = null; }
   stopRecording();
-  capShots = 0;
   photos.length = 0;
   const gal = $("capture");
   gal.style.display = "block";
-  gal.innerHTML = `<h2>CAPTURE — ${CAP_SECONDS} photos + footage</h2>` +
+  gal.innerHTML = `<h2>${title}</h2>` +
     `<button id="saveAll" class="save" type="button">Save all photos (.zip)</button>` +
     `<div id="shots"></div>`;
   $("saveAll").addEventListener("click", saveAllPhotos);
+}
 
+function startCapture() {
+  resetGallery(`CAPTURE — ${CAP_SECONDS} photos + footage`);
+  capShots = 0;
   captureFrame();                                  // first photo at t=0
   capTimer = setInterval(() => {
     captureFrame();
@@ -515,6 +553,35 @@ function startCapture() {
 
   startRecording();
   setTimeout(stopRecording, CAP_SECONDS * 1000);
+}
+
+// Single photo (used by the "Take shot" button).
+function takeShot() {
+  resetGallery("SINGLE SHOT");
+  captureFrame();
+}
+
+// 5-second countdown, then grab one photo. Assumes the camera is already running.
+let shotTimer = null;
+function startShotCountdown(secs = 5) {
+  if (!video.srcObject) { setGuide("Start the camera first."); return; }
+  if (shotTimer) clearInterval(shotTimer);
+  cancelCountdown();                               // don't clash with a calibration countdown
+  let left = secs;
+  const tick = () => {
+    setGuide(`Taking a shot in <b>${left}</b>s…`);
+    beep(left <= 2 ? 1320 : 880, 0.07);
+  };
+  setStatus("shot…", "cal");
+  tick();
+  shotTimer = setInterval(() => {
+    if (--left > 0) { tick(); return; }
+    clearInterval(shotTimer); shotTimer = null;
+    beepStart();
+    takeShot();
+    setStatus(mode === "play" ? "live" : "camera on", mode === "play" ? "live" : "");
+    setGuide(`Shot taken — see it in the gallery below.`);
+  }, 1000);
 }
 
 function captureFrame() {
@@ -682,13 +749,33 @@ $("startBtn").addEventListener("click", async () => {
   if (!ok) return;
   $("prompt").style.display = "none";
   $("calBtn").disabled = false;
+  $("shotBtn").disabled = false;
   keepAwake();
   setStatus("camera on");
   setGuide(`Tap <b>Calibrate</b> to start the 10-second countdown, then close the box.`);
   loop();
 });
+document.querySelectorAll("#tabs .tab").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const t = btn.dataset.tab;
+    document.querySelectorAll("#tabs .tab").forEach(b => b.classList.toggle("active", b === btn));
+    $("tab-play").hidden  = t !== "play";
+    $("tab-notes").hidden = t !== "notes";
+  });
+});
 $("detectBtn").addEventListener("click", detectCameras);
+$("facing").addEventListener("change", async () => {
+  if (!cameraOn) return;                            // not started yet — Start will use the selection
+  errEl.style.display = "none";
+  const ok = await startCamera();                   // swap the live camera
+  if (!ok) return;
+  zones = [];                                        // the view changed → old calibration is void
+  mode = "idle";
+  setStatus("camera on");
+  setGuide(`Camera switched — tap <b>Calibrate</b> to set it up.`);
+});
 $("calBtn").addEventListener("click", () => startCountdown(10));   // countdown → auto-calibrates at 0
+$("shotBtn").addEventListener("click", () => startShotCountdown(5)); // 5s countdown → single photo
 $("toneBtn").addEventListener("click", () => {
   if (!actx) return;
   [0, 2, 4].forEach((n, j) => setTimeout(() => blip(Math.min(n, numKeys - 1), 0.2), j * 160));
