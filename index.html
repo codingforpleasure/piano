@@ -58,6 +58,7 @@
   }
   #prompt p { color: var(--dim); font-size: 14px; line-height: 1.5; max-width: 320px; }
   #prompt .camPick { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim); }
+  #prompt .camNote { font-size: 12px; color: var(--dim); min-height: 15px; max-width: 320px; line-height: 1.4; }
   #guide {
     position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 14px;
     background: linear-gradient(transparent, rgba(0,0,0,0.75));
@@ -142,6 +143,8 @@
         <option value="user">Front camera</option>
       </select>
     </label>
+    <button class="ghost" id="detectBtn" type="button">Detect ultra-wide</button>
+    <div id="camNote" class="camNote"></div>
     <button class="primary" id="startBtn">Start camera &amp; sound</button>
   </div>
 </div>
@@ -293,10 +296,13 @@ async function startCamera() {
     return false;
   }
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { facingMode: $("facing").value, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } }
-    });
+    const sel = $("facing").value;
+    // "environment"/"user" → pick by facing; anything else is a specific deviceId (e.g. ultra-wide).
+    const base = { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } };
+    const videoConstraints = (sel === "environment" || sel === "user")
+      ? { ...base, facingMode: sel }
+      : { ...base, deviceId: { exact: sel } };
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: videoConstraints });
     video.srcObject = stream;
     await video.play();
     // Note: no manual exposure lock — locking to "manual" without an exposureTime
@@ -306,6 +312,38 @@ async function startCamera() {
   } catch (e) {
     showErr("Camera permission denied or unavailable: " + e.message);
     return false;
+  }
+}
+
+/* Detect cameras and, if an ultra-wide lens is present, add it to the picker.
+   Labels are only revealed after camera permission, so grab a throwaway stream first. */
+async function detectCameras() {
+  const note = $("camNote");
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+    note.textContent = "Camera list not available in this browser."; return;
+  }
+  note.textContent = "Scanning cameras…";
+  try {
+    let devices = await navigator.mediaDevices.enumerateDevices();
+    if (!devices.some(d => d.kind === "videoinput" && d.label)) {
+      const s = await navigator.mediaDevices.getUserMedia({ video: true });
+      s.getTracks().forEach(t => t.stop());           // permission only; release it immediately
+      devices = await navigator.mediaDevices.enumerateDevices();
+    }
+    const cams = devices.filter(d => d.kind === "videoinput");
+    const uw = cams.find(d => /ultra|wide|0[.,]5/i.test(d.label) && !/tele|zoom|front|user/i.test(d.label));
+    const old = $("uwOpt"); if (old) old.remove();
+    if (uw) {
+      const o = document.createElement("option");
+      o.id = "uwOpt"; o.value = uw.deviceId; o.textContent = "Ultra-wide camera";
+      $("facing").appendChild(o);
+      $("facing").value = uw.deviceId;
+      note.textContent = `Ultra-wide found — selected. (${cams.length} cameras total)`;
+    } else {
+      note.textContent = `No ultra-wide detected (${cams.length} camera${cams.length === 1 ? "" : "s"}). Some phones/iOS don't expose it to the browser.`;
+    }
+  } catch (e) {
+    note.textContent = "Couldn't list cameras: " + e.message;
   }
 }
 async function keepAwake() {
@@ -649,6 +687,7 @@ $("startBtn").addEventListener("click", async () => {
   setGuide(`Tap <b>Calibrate</b> to start the 10-second countdown, then close the box.`);
   loop();
 });
+$("detectBtn").addEventListener("click", detectCameras);
 $("calBtn").addEventListener("click", () => startCountdown(10));   // countdown → auto-calibrates at 0
 $("toneBtn").addEventListener("click", () => {
   if (!actx) return;
