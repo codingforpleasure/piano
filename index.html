@@ -323,6 +323,13 @@ function stopStream() {
   if (s) s.getTracks().forEach(t => t.stop());
   video.srcObject = null;
 }
+// Size the canvas + stage to the camera's real frame so it isn't stretched to a fixed 4:3.
+function fitPreview() {
+  const w = video.videoWidth, h = video.videoHeight;
+  if (!w || !h) return;
+  view.width = w; view.height = h;
+  $("stage").style.aspectRatio = `${w} / ${h}`;
+}
 async function startCamera() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     showErr("Camera API unavailable. Open this page over HTTPS (e.g. a Netlify or GitHub Pages link) — camera access is blocked on plain file:// or http://.");
@@ -342,6 +349,7 @@ async function startCamera() {
     // Note: no manual exposure lock — locking to "manual" without an exposureTime
     // blacks the image out instantly on many devices. Auto-exposure is fine for a
     // stable box; the drift-compensating baseline (EMA_ALPHA) absorbs slow changes.
+    fitPreview();                                   // match canvas + stage to the real frame aspect
     cameraOn = true;
     return true;
   } catch (e) {
