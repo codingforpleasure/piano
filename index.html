@@ -219,8 +219,6 @@
 const PW = 160, PH = 120;               // processing resolution
 const NAMES = ["C4","D4","E4","F4","G4","A4","B4","C5","D5","E5"];
 const FREQS = [261.63,293.66,329.63,349.23,392.00,440.00,493.88,523.25,587.33,659.25];
-const BLOB_DIFF = 26;                    // per-pixel diff for calibration blobs
-const BLOB_MIN  = 10;                    // min changed pixels to accept a blob
 const REMOVE_DELTA = 40;                 // whole-frame brightening that means "lifted out of the box"
 const CAL_IDLE_MS = 4000;                // sealed box has no button: auto-finish calibration after this idle gap
 // --- play detection (find-the-light-and-name-it), all in the 160x120 processing frame ---
@@ -230,14 +228,15 @@ const PEAK_BAND   = 35;                   // centroid uses pixels within this of
 const CENTROID_R  = 18;                   // px search radius around the brightest pixel
 const MAX_MAP_DIST = 35;                  // if the light lands farther than this from every hole, ignore it
 const SWITCH_FRAMES = 2;                  // a new winner must persist this many frames before the note switches
+const CLUSTER_R   = 12;                   // calibration: centroids within this many px are the same hole
+const CAL_MIN_HITS = 3;                   // calibration: a hole must be seen this many frames to count (rejects noise)
 
 /* ---------- 2. state ---------- */
-let mode = "idle";                       // idle | baseline | calibrate | play
+let mode = "idle";                       // idle | calibrate | play | removed
 let numKeys = 5;
-let zones = [];                          // {x,y,w,h, base, sig, pressed, note, freq, name}
-let calIndex = 0, calHold = 0, calRelease = 0, baseFrames = 0;
+let zones = [];                          // {x,y,w,h, cx,cy, pressed, note, freq, name}
+let clusters = [];                        // calibration: running {cx,cy,hits} position clusters, one per hole
 let lastCalHit = 0;                       // timestamp of last hole activity, for hands-free auto-finish
-let baselineFrame = new Float32Array(PW * PH);
 let gain = 1.0;                           // sensitivity = light gain (ISO-style): brightens footage AND scales detection
 let reachedOrder = [];                    // note indices reached this session, in order
 let darkMean = 0;                         // mean frame luma inside the closed box (removal reference)
@@ -428,13 +427,13 @@ function frameMeanLuma(d) {
 /* ---------- 8. calibration ---------- */
 function startCalibration() {
   zones = [];
+  clusters = [];
   reachedOrder = [];
-  calIndex = 0; baseFrames = 0;
-  baselineFrame.fill(0);
-  mode = "baseline";
+  mode = "calibrate";
+  lastCalHit = Date.now();
   setStatus("calibrating", "cal");
   keyEls.forEach(k => k.className = "key uncal");
-  setGuide("Hold still — learning the dark box…");
+  setGuide("Sweep the window slowly across <b>all</b> the holes…");
 }
 
 /* Auto-calibrate countdown: gives you time to close the phone in the box. */
@@ -455,69 +454,59 @@ function startCountdown(secs = 10) {
     if (--left > 0) { tick(); return; }
     cancelCountdown();
     beepStart();                           // audible "starting now" cue
-    startCalibration();                    // box is dark by now → baseline learns correctly
+    startCalibration();                    // box is closed by now → begin the sweep
     startCapture();                        // photos every second + footage, through calibration
   }, 1000);
 }
+// Calibration by SWEEP (not press-per-key): you slide the single window across every hole once.
+// Each frame we locate the lit hole exactly like play does, then fold its centroid into a running
+// position cluster. Holes are discovered as distinct clusters — no per-key press/release timing,
+// which is what broke with a continuous sweep (only the first hole ever registered). When no hole
+// has been seen for CAL_IDLE_MS, we finalise: order the clusters along the line and assign notes.
 function calibrationStep(d) {
-  if (mode === "baseline") {
-    for (let p = 0; p < PW * PH; p++) baselineFrame[p] += lumaAt(d, p);
-    if (++baseFrames >= 30) {
-      for (let p = 0; p < PW * PH; p++) baselineFrame[p] /= 30;
-      mode = "calibrate"; calHold = 0; calRelease = 0;
-      lastCalHit = Date.now();               // start the idle clock for hands-free auto-finish
-      setGuide(`Press key <b>1</b> and hold briefly.`);
-    }
-    return;
-  }
-  // find blob of brightened pixels
-  let minx = PW, miny = PH, maxx = -1, maxy = -1, count = 0;
-  for (let y = 0; y < PH; y++) for (let x = 0; x < PW; x++) {
-    const p = y * PW + x;
-    if (lumaAt(d, p) - baselineFrame[p] > BLOB_DIFF) {
-      count++;
-      if (x < minx) minx = x; if (x > maxx) maxx = x;
-      if (y < miny) miny = y; if (y > maxy) maxy = y;
-    }
-  }
-  // Hands-free finish: box is sealed, so there's no button. Keep the clock alive while a
-  // hole is lit; once no hole has appeared for CAL_IDLE_MS and we've learned at least one,
-  // enter play automatically. This makes numKeys an upper bound, not an exact requirement.
   const now = Date.now();
-  if (count >= BLOB_MIN) lastCalHit = now;
-  else if (zones.length && now - lastCalHit > CAL_IDLE_MS) { enterPlay(); return; }
-  if (calRelease > 0) {                        // waiting for previous key to close
-    if (count < BLOB_MIN / 2 && ++calHold >= 4) {
-      calRelease = 0; calHold = 0;
-      if (calIndex >= numKeys) { enterPlay(); return; }
-      setGuide(`Press key <b>${calIndex + 1}</b> and hold briefly.`);
-    } else if (count >= BLOB_MIN) calHold = 0;
-    return;
-  }
-  if (count >= BLOB_MIN) {
-    if (++calHold >= 3) {                      // stable for 3 frames -> register
-      const pad = 2;
-      const z = {
-        x: Math.max(0, minx - pad), y: Math.max(0, miny - pad),
-        w: Math.min(PW - 1, maxx + pad) - Math.max(0, minx - pad) + 1,
-        h: Math.min(PH - 1, maxy + pad) - Math.max(0, miny - pad) + 1,
-        base: 0, sig: 0, pressed: false,
-        note: calIndex, freq: FREQS[calIndex], name: NAMES[calIndex]
-      };
-      const cx = z.x + z.w / 2, cy = z.y + z.h / 2;
-      const dup = zones.some(o => cx >= o.x && cx <= o.x + o.w && cy >= o.y && cy <= o.y + o.h);
-      if (!dup) {
-        z.cx = cx; z.cy = cy;                            // hole centre — the play detector maps light to the nearest of these
-        zones.push(z);
-        keyEls[calIndex].classList.remove("uncal");
-        blip(calIndex);
-        calIndex++; calHold = 0; calRelease = 1;
-        setGuide(calIndex >= numKeys
-          ? `Release — all <b>${numKeys}</b> keys learned!`
-          : `Got it. Release key <b>${calIndex}</b>…`);
-      } else { calHold = 0; }
+  const L = findLight(d);
+
+  if (L.lit) {
+    let best = Infinity, bi = -1;
+    for (let i = 0; i < clusters.length; i++) {
+      const c = clusters[i], dx = L.cx - c.cx, dy = L.cy - c.cy, dd = dx * dx + dy * dy;
+      if (dd < best) { best = dd; bi = i; }
     }
-  } else calHold = 0;
+    if (bi >= 0 && best <= CLUSTER_R * CLUSTER_R) {   // same hole → refine its running average
+      const c = clusters[bi];
+      c.cx = (c.cx * c.hits + L.cx) / (c.hits + 1);
+      c.cy = (c.cy * c.hits + L.cy) / (c.hits + 1);
+      c.hits++;
+    } else {                                          // a new hole
+      clusters.push({ cx: L.cx, cy: L.cy, hits: 1 });
+      beep(1100, 0.06);                               // audible "found a hole" cue from inside the box
+    }
+    lastCalHit = now;
+    const solid = clusters.filter(c => c.hits >= CAL_MIN_HITS).length;
+    setGuide(`Sweeping… found <b>${solid}</b> hole${solid === 1 ? "" : "s"} so far.`);
+  } else if (clusters.some(c => c.hits >= CAL_MIN_HITS) && now - lastCalHit > CAL_IDLE_MS) {
+    finalizeCalibration();
+  }
+
+  if (showDetect) buildDetectOverlay(d, L.mx, L.bg, L.lit, L.cx, L.cy, -1);
+}
+
+// Turn the swept clusters into ordered, note-mapped holes and start playing.
+function finalizeCalibration() {
+  let cs = clusters.filter(c => c.hits >= CAL_MIN_HITS);   // drop noise blips
+  if (!cs.length) cs = clusters.slice();
+  cs.sort((a, b) => (a.cy - b.cy) || (a.cx - b.cx));       // vertical line: top → bottom
+  cs = cs.slice(0, numKeys);
+  const W = 16;
+  zones = cs.map((c, i) => ({
+    x: Math.max(0, Math.round(c.cx - W / 2)), y: Math.max(0, Math.round(c.cy - W / 2)),
+    w: W, h: W, cx: c.cx, cy: c.cy,
+    note: i, freq: FREQS[i], name: NAMES[i], pressed: false
+  }));
+  keyEls.forEach(k => k.classList.add("uncal"));
+  zones.forEach(z => keyEls[z.note]?.classList.remove("uncal"));
+  enterPlay();
 }
 function enterPlay() {
   mode = "play";
@@ -762,10 +751,10 @@ function buildDetectOverlay(d, mx, bg, lit, cx, cy, winner) {
     : `silence • max ${mx}`;
 }
 
-function playStep(d) {
-  if (frameMeanLuma(d) > darkMean + REMOVE_DELTA) { handleRemoval(); return; }  // lifted out
-
-  // 1. one pass: background level (mean) + brightest pixel and where it is
+// Shared by calibration and play: find the single brightest lit spot and its centroid.
+// Returns {mx, bg, lit, cx, cy}. `lit` is gated against the frame's OWN background so it
+// survives auto-exposure drift; cx/cy are -1 when nothing qualifies.
+function findLight(d) {
   let sum = 0, mx = 0, mxp = 0;
   const N = PW * PH;
   for (let p = 0; p < N; p++) {
@@ -774,32 +763,37 @@ function playStep(d) {
     if (v > mx) { mx = v; mxp = p; }
   }
   const bg = sum / N;
-
-  // 2. is a hole actually lit?  Sensitivity (gain) loosens/tightens the gate. Rejects the dim,
-  //    diffuse frames captured while the window is BETWEEN holes (measured max<200 or small gap).
-  const lit = mx >= SAT_FLOOR && (mx - bg) >= GAP_MIN / gain;
-
-  // 3. locate it: centroid of the near-saturated core around the peak, snapped to nearest hole
-  let winner = -1, cx = -1, cy = -1;
-  if (lit && zones.length) {
+  const gated = mx >= SAT_FLOOR && (mx - bg) >= GAP_MIN / gain;
+  let cx = -1, cy = -1;
+  if (gated) {
     const gx = mxp % PW, gy = (mxp / PW) | 0, thr = mx - PEAK_BAND;
     let sx = 0, sy = 0, n = 0;
     for (let y = Math.max(0, gy - CENTROID_R); y <= Math.min(PH - 1, gy + CENTROID_R); y++)
       for (let x = Math.max(0, gx - CENTROID_R); x <= Math.min(PW - 1, gx + CENTROID_R); x++)
         if (lumaAt(d, y * PW + x) >= thr) { sx += x; sy += y; n++; }
-    if (n) {
-      cx = sx / n; cy = sy / n;
-      let best = Infinity;
-      for (const z of zones) {
-        const dx = cx - z.cx, dy = cy - z.cy, dd = dx * dx + dy * dy;
-        if (dd < best) { best = dd; winner = z.note; }
-      }
-      if (best > MAX_MAP_DIST * MAX_MAP_DIST) winner = -1;   // light isn't near any hole
-    }
+    if (n) { cx = sx / n; cy = sy / n; }
   }
-  if (showDetect) buildDetectOverlay(d, mx, bg, lit, cx, cy, winner);
+  return { mx, bg, lit: gated && cx >= 0, cx, cy };
+}
 
-  // 4. hold + temporal hysteresis: the active note sustains until a DIFFERENT winner
+function playStep(d) {
+  if (frameMeanLuma(d) > darkMean + REMOVE_DELTA) { handleRemoval(); return; }  // lifted out
+
+  const L = findLight(d);
+
+  // snap the light to the nearest calibrated hole
+  let winner = -1;
+  if (L.lit && zones.length) {
+    let best = Infinity;
+    for (const z of zones) {
+      const dx = L.cx - z.cx, dy = L.cy - z.cy, dd = dx * dx + dy * dy;
+      if (dd < best) { best = dd; winner = z.note; }
+    }
+    if (best > MAX_MAP_DIST * MAX_MAP_DIST) winner = -1;   // light isn't near any hole
+  }
+  if (showDetect) buildDetectOverlay(d, L.mx, L.bg, L.lit, L.cx, L.cy, winner);
+
+  // hold + temporal hysteresis: the active note sustains until a DIFFERENT winner
   //    (a different hole, or none) has persisted for SWITCH_FRAMES frames.
   if (winner === activeNote) { pendNote = -2; pendCount = 0; }
   else {
@@ -832,7 +826,7 @@ function render() {
   const sx = view.width / PW, sy = view.height / PH;
 
   // binarization overlay: the red mask is exactly the pixels the detector counts as "lit"
-  if (showDetect && mode === "play") {
+  if (showDetect && (mode === "play" || mode === "calibrate")) {
     vctx.imageSmoothingEnabled = false;
     vctx.globalAlpha = 0.5;
     vctx.drawImage(dbgCanvas, 0, 0, view.width, view.height);
@@ -848,7 +842,7 @@ function render() {
   }
 
   // green crosshair at the detected centroid — where the light was located this frame
-  if (showDetect && mode === "play" && dbg.lit && dbg.cx >= 0) {
+  if (showDetect && (mode === "play" || mode === "calibrate") && dbg.lit && dbg.cx >= 0) {
     const px = dbg.cx * sx, py = dbg.cy * sy;
     vctx.strokeStyle = "#39ff88"; vctx.lineWidth = 2;
     vctx.beginPath();
@@ -862,7 +856,7 @@ function render() {
 function loop() {
   if (video.readyState >= 2) {
     const d = grabFrame();
-    if (mode === "baseline" || mode === "calibrate") calibrationStep(d);
+    if (mode === "calibrate") calibrationStep(d);
     else if (mode === "play") playStep(d);
     render();
   }
@@ -916,7 +910,7 @@ $("numKeys").addEventListener("change", e => {
   if (actx) rebuildVoices();
   zones = [];
   cancelCountdown();
-  if (mode === "play" || mode === "calibrate" || mode === "baseline") {
+  if (mode === "play" || mode === "calibrate") {
     mode = "idle"; setStatus("camera on");
     setGuide(`Key count changed — tap <b>Calibrate</b> again.`);
   }
