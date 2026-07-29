@@ -175,6 +175,11 @@
       <input type="range" id="sens" min="8" max="60" value="30">
       <output id="sensOut">1.00×</output>
     </div>
+    <div class="row">
+      <label for="dbgChk">Show detection</label>
+      <input type="checkbox" id="dbgChk" checked>
+      <output id="dbgOut">—</output>
+    </div>
     <div class="btnrow">
       <button class="primary" id="calBtn" disabled>Calibrate</button>
       <button class="primary" id="shotBtn" disabled>Take shot</button>
@@ -736,6 +741,27 @@ let pendNote = -2, pendCount = 0;          // debounced candidate for the next n
 
 function resetDetection() { activeNote = -1; pendNote = -2; pendCount = 0; }
 
+// Live binarization overlay (screen-only diagnostic — never recorded): shows exactly which
+// pixels pass the "lit" threshold, plus the centroid and chosen hole.
+let showDetect = true;
+const dbgCanvas = document.createElement("canvas"); dbgCanvas.width = PW; dbgCanvas.height = PH;
+const dbgCtx = dbgCanvas.getContext("2d");
+const dbgImg = dbgCtx.createImageData(PW, PH);
+let dbg = { lit: false, cx: -1, cy: -1, winner: -1, mx: 0, bg: 0 };
+
+function buildDetectOverlay(d, mx, bg, lit, cx, cy, winner) {
+  const data = dbgImg.data, thr = mx - PEAK_BAND, N = PW * PH;
+  for (let p = 0; p < N; p++) {
+    const q = p * 4, on = lit && lumaAt(d, p) >= thr;   // the near-saturated core the detector binarizes
+    data[q] = 255; data[q + 1] = 40; data[q + 2] = 40; data[q + 3] = on ? 210 : 0;
+  }
+  dbgCtx.putImageData(dbgImg, 0, 0);
+  dbg.lit = lit; dbg.cx = cx; dbg.cy = cy; dbg.winner = winner; dbg.mx = mx; dbg.bg = Math.round(bg);
+  $("dbgOut").textContent = lit
+    ? `lit • gap ${Math.round(mx - bg)} • ${winner >= 0 ? NAMES[winner] : "no hole"}`
+    : `silence • max ${mx}`;
+}
+
 function playStep(d) {
   if (frameMeanLuma(d) > darkMean + REMOVE_DELTA) { handleRemoval(); return; }  // lifted out
 
@@ -754,7 +780,7 @@ function playStep(d) {
   const lit = mx >= SAT_FLOOR && (mx - bg) >= GAP_MIN / gain;
 
   // 3. locate it: centroid of the near-saturated core around the peak, snapped to nearest hole
-  let winner = -1;
+  let winner = -1, cx = -1, cy = -1;
   if (lit && zones.length) {
     const gx = mxp % PW, gy = (mxp / PW) | 0, thr = mx - PEAK_BAND;
     let sx = 0, sy = 0, n = 0;
@@ -762,7 +788,7 @@ function playStep(d) {
       for (let x = Math.max(0, gx - CENTROID_R); x <= Math.min(PW - 1, gx + CENTROID_R); x++)
         if (lumaAt(d, y * PW + x) >= thr) { sx += x; sy += y; n++; }
     if (n) {
-      const cx = sx / n, cy = sy / n;
+      cx = sx / n; cy = sy / n;
       let best = Infinity;
       for (const z of zones) {
         const dx = cx - z.cx, dy = cy - z.cy, dd = dx * dx + dy * dy;
@@ -771,6 +797,7 @@ function playStep(d) {
       if (best > MAX_MAP_DIST * MAX_MAP_DIST) winner = -1;   // light isn't near any hole
     }
   }
+  if (showDetect) buildDetectOverlay(d, mx, bg, lit, cx, cy, winner);
 
   // 4. hold + temporal hysteresis: the active note sustains until a DIFFERENT winner
   //    (a different hole, or none) has persisted for SWITCH_FRAMES frames.
@@ -803,12 +830,31 @@ function render() {
   vctx.drawImage(video, 0, 0, view.width, view.height);
   vctx.filter = "none";                          // overlays stay crisp, unaffected by gain
   const sx = view.width / PW, sy = view.height / PH;
+
+  // binarization overlay: the red mask is exactly the pixels the detector counts as "lit"
+  if (showDetect && mode === "play") {
+    vctx.imageSmoothingEnabled = false;
+    vctx.globalAlpha = 0.5;
+    vctx.drawImage(dbgCanvas, 0, 0, view.width, view.height);
+    vctx.globalAlpha = 1;
+  }
+
   vctx.lineWidth = 2; vctx.font = "bold 15px ui-monospace, monospace";
   for (const z of zones) {
     vctx.strokeStyle = z.pressed ? "#ffb63d" : "rgba(240,234,217,0.45)";
     vctx.strokeRect(z.x * sx, z.y * sy, z.w * sx, z.h * sy);
     vctx.fillStyle = z.pressed ? "#ffb63d" : "rgba(240,234,217,0.7)";
     vctx.fillText(z.name, z.x * sx + 3, z.y * sy - 4);
+  }
+
+  // green crosshair at the detected centroid — where the light was located this frame
+  if (showDetect && mode === "play" && dbg.lit && dbg.cx >= 0) {
+    const px = dbg.cx * sx, py = dbg.cy * sy;
+    vctx.strokeStyle = "#39ff88"; vctx.lineWidth = 2;
+    vctx.beginPath();
+    vctx.moveTo(px - 13, py); vctx.lineTo(px + 13, py);
+    vctx.moveTo(px, py - 13); vctx.lineTo(px, py + 13);
+    vctx.stroke();
   }
 }
 
@@ -881,6 +927,10 @@ $("sens").addEventListener("input", e => {
   // so what the user sees getting brighter is exactly what makes notes easier to trigger.
   gain = +e.target.value / 30;
   $("sensOut").textContent = gain.toFixed(2) + "×";
+});
+$("dbgChk").addEventListener("change", e => {
+  showDetect = e.target.checked;
+  if (!showDetect) $("dbgOut").textContent = "—";
 });
 
 buildKeyStrip();
