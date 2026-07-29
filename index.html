@@ -172,8 +172,8 @@
   <div id="controls">
     <div class="row">
       <label for="sens">Sensitivity</label>
-      <input type="range" id="sens" min="8" max="60" value="46">
-      <output id="sensOut">46</output>
+      <input type="range" id="sens" min="8" max="60" value="30">
+      <output id="sensOut">1.00×</output>
     </div>
     <div class="btnrow">
       <button class="primary" id="calBtn" disabled>Calibrate</button>
@@ -218,6 +218,10 @@ const BLOB_DIFF = 26;                    // per-pixel diff for calibration blobs
 const BLOB_MIN  = 10;                    // min changed pixels to accept a blob
 const EMA_ALPHA = 0.03;                  // baseline drift speed while idle
 const REMOVE_DELTA = 40;                 // whole-frame brightening that means "lifted out of the box"
+const PEAK_FRAC = 0.15;                  // detection samples the brightest 15% of a zone, not its mean (#1)
+const ON_FRAC   = 0.40;                  // per-hole press at 40% of its own dark->lit swing (#2)
+const OFF_FRAC  = 0.22;                  // per-hole release at 22% (hysteresis)
+const MIN_ON    = 8;                     // noise floor so a barely-lit hole can't be tripped by grain
 
 /* ---------- 2. state ---------- */
 let mode = "idle";                       // idle | baseline | calibrate | play
@@ -225,7 +229,7 @@ let numKeys = 10;
 let zones = [];                          // {x,y,w,h, base, sig, pressed, note, freq, name}
 let calIndex = 0, calHold = 0, calRelease = 0, baseFrames = 0;
 let baselineFrame = new Float32Array(PW * PH);
-let tOn = 22, tOff = 10;
+let gain = 1.0;                           // sensitivity = light gain (ISO-style): brightens footage AND scales detection
 let reachedOrder = [];                    // note indices reached this session, in order
 let darkMean = 0;                         // mean frame luma inside the closed box (removal reference)
 
@@ -406,6 +410,19 @@ function zoneLuma(d, z) {
     for (let x = z.x; x < z.x + z.w; x++) { sum += lumaAt(d, y * PW + x); n++; }
   return n ? sum / n : 0;
 }
+// Brightness of a zone's brightest PEAK_FRAC pixels (#1). A small, off-centre lit spot
+// spikes this even though it barely moves the flat mean, so tiny holes stop getting missed.
+// `get(p)` reads one pixel: lumaAt(d,·) for a live frame, or baselineFrame[·] for the dark ref.
+function zonePeakBy(z, get) {
+  const vals = [];
+  for (let y = z.y; y < z.y + z.h; y++)
+    for (let x = z.x; x < z.x + z.w; x++) vals.push(get(y * PW + x));
+  vals.sort((a, b) => b - a);
+  const k = Math.max(1, Math.ceil(vals.length * PEAK_FRAC));
+  let sum = 0; for (let i = 0; i < k; i++) sum += vals[i];
+  return sum / k;
+}
+const zonePeak = (d, z) => zonePeakBy(z, p => lumaAt(d, p));
 function frameMeanLuma(d) {
   let sum = 0; const N = PW * PH;
   for (let p = 0; p < N; p++) sum += lumaAt(d, p);
@@ -487,6 +504,13 @@ function calibrationStep(d) {
       const cx = z.x + z.w / 2, cy = z.y + z.h / 2;
       const dup = zones.some(o => cx >= o.x && cx <= o.x + o.w && cy >= o.y && cy <= o.y + o.h);
       if (!dup) {
+        // #2: measure THIS hole's dark and lit peaks (same metric detection uses),
+        // then set its own thresholds from its own swing — dim and bright holes each get tuned.
+        z.dark = zonePeakBy(z, p => baselineFrame[p]);   // dark reference
+        z.lit  = zonePeak(d, z);                          // brightness while pressed right now
+        z.amp  = Math.max(1, z.lit - z.dark);            // this hole's dark->lit swing
+        z.on   = Math.max(MIN_ON, ON_FRAC * z.amp);
+        z.off  = Math.min(OFF_FRAC * z.amp, 0.6 * z.on); // release always below press
         zones.push(z);
         keyEls[calIndex].classList.remove("uncal");
         blip(calIndex);
@@ -503,7 +527,7 @@ function enterPlay() {
   setStatus("live", "live");
   setGuide(`Play! Lift the phone out of the box to see which keys were reached.`);
   const d = grabFrame();
-  zones.forEach(z => { z.base = zoneLuma(d, z); z.pressed = false; });
+  zones.forEach(z => { z.base = zonePeak(d, z); z.pressed = false; });   // dark baseline, peak metric (#1)
   darkMean = frameMeanLuma(d);              // brightness reference of the closed, dark box
   clearReached();
 }
@@ -708,24 +732,27 @@ function finishRecording() {
 function playStep(d) {
   if (frameMeanLuma(d) > darkMean + REMOVE_DELTA) { handleRemoval(); return; }  // lifted out
   for (const z of zones) {
-    const l = zoneLuma(d, z);
+    const l = zonePeak(d, z);                    // brightest pixels in the zone (#1)
     z.sig = l - z.base;
+    const s = z.sig * gain;                     // amplified signal — same gain the screen shows
     if (!z.pressed) {
       z.base += EMA_ALPHA * (l - z.base);      // drift-compensating baseline, frozen while pressed
-      if (z.sig > tOn)  { z.pressed = true;  noteOn(z.note); recordReached(z.note); }
-    } else if (z.sig < tOff) { z.pressed = false; noteOff(z.note); }
+      if (s > z.on)  { z.pressed = true;  noteOn(z.note); recordReached(z.note); }   // per-hole threshold (#2)
+    } else if (s < z.off) { z.pressed = false; noteOff(z.note); }
     const k = keyEls[z.note];
     if (k) {
       k.classList.toggle("on", z.pressed);
       k.querySelector(".fill").style.height =
-        Math.max(0, Math.min(100, (z.sig / tOn) * 100)) + "%";
+        Math.max(0, Math.min(100, (s / z.on) * 100)) + "%";   // 100% = at this hole's trigger point
     }
   }
 }
 
 /* ---------- 10. render ---------- */
 function render() {
+  vctx.filter = `brightness(${gain})`;          // sensitivity gain amplifies the live footage (ISO-style)
   vctx.drawImage(video, 0, 0, view.width, view.height);
+  vctx.filter = "none";                          // overlays stay crisp, unaffected by gain
   const sx = view.width / PW, sy = view.height / PH;
   vctx.lineWidth = 2; vctx.font = "bold 15px ui-monospace, monospace";
   for (const z of zones) {
@@ -800,11 +827,11 @@ $("numKeys").addEventListener("change", e => {
   }
 });
 $("sens").addEventListener("input", e => {
-  // Slider reads as sensitivity (right = more sensitive), but the detector wants a
-  // threshold (lower = more sensitive), so invert: tOn = min+max - value = 68 - value.
-  const sens = +e.target.value;
-  tOn = 68 - sens; tOff = Math.round(tOn * 0.45);
-  $("sensOut").textContent = sens;
+  // Sensitivity = light gain (ISO-style). value 8..60 maps to ~0.27x..2.0x, centred on 1.0x at 30.
+  // The same gain brightens the on-screen footage (render) and scales the detected signal (playStep),
+  // so what the user sees getting brighter is exactly what makes notes easier to trigger.
+  gain = +e.target.value / 30;
+  $("sensOut").textContent = gain.toFixed(2) + "×";
 });
 
 buildKeyStrip();
