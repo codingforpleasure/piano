@@ -229,7 +229,7 @@ const CENTROID_R  = 18;                   // px search radius around the brighte
 const MAX_MAP_DIST = 35;                  // if the light lands farther than this from every hole, ignore it
 const SWITCH_FRAMES = 2;                  // a new winner must persist this many frames before the note switches
 const CLUSTER_R   = 12;                   // calibration: centroids within this many px are the same hole
-const CAL_MIN_HITS = 3;                   // calibration: a hole must be seen this many frames to count (rejects noise)
+const CAL_MIN_HITS = 2;                   // calibration: a hole must be seen this many frames to count (rejects noise)
 
 /* ---------- 2. state ---------- */
 let mode = "idle";                       // idle | calibrate | play | removed
@@ -480,7 +480,7 @@ function calibrationStep(d) {
       c.hits++;
     } else {                                          // a new hole
       clusters.push({ cx: L.cx, cy: L.cy, hits: 1 });
-      beep(1100, 0.06);                               // audible "found a hole" cue from inside the box
+      blip(Math.min(clusters.length - 1, numKeys - 1), 0.16);   // play THIS hole's note as it's found
     }
     lastCalHit = now;
     const solid = clusters.filter(c => c.hits >= CAL_MIN_HITS).length;
@@ -507,6 +507,8 @@ function finalizeCalibration() {
   keyEls.forEach(k => k.classList.add("uncal"));
   zones.forEach(z => keyEls[z.note]?.classList.remove("uncal"));
   enterPlay();
+  // confirm the mapping by ear: play each hole's note in order, low → high
+  zones.forEach((z, i) => setTimeout(() => blip(z.note, 0.18), 600 + i * 220));
 }
 function enterPlay() {
   mode = "play";
