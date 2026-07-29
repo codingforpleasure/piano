@@ -216,13 +216,15 @@ const NAMES = ["C4","D4","E4","F4","G4","A4","B4","C5","D5","E5"];
 const FREQS = [261.63,293.66,329.63,349.23,392.00,440.00,493.88,523.25,587.33,659.25];
 const BLOB_DIFF = 26;                    // per-pixel diff for calibration blobs
 const BLOB_MIN  = 10;                    // min changed pixels to accept a blob
-const EMA_ALPHA = 0.03;                  // baseline drift speed while idle
 const REMOVE_DELTA = 40;                 // whole-frame brightening that means "lifted out of the box"
-const PEAK_FRAC = 0.15;                  // detection samples the brightest 15% of a zone, not its mean (#1)
-const ON_FRAC   = 0.40;                  // per-hole press at 40% of its own dark->lit swing (#2)
-const OFF_FRAC  = 0.22;                  // per-hole release at 22% (hysteresis)
-const MIN_ON    = 8;                     // noise floor so a barely-lit hole can't be tripped by grain
 const CAL_IDLE_MS = 4000;                // sealed box has no button: auto-finish calibration after this idle gap
+// --- play detection (find-the-light-and-name-it), all in the 160x120 processing frame ---
+const SAT_FLOOR   = 200;                 // a lit hole saturates well past this; dim diffuse "between holes" frames don't
+const GAP_MIN     = 95;                   // lit peak must beat the frame's OWN background by this (at gain 1) -> auto-exposure-proof
+const PEAK_BAND   = 35;                   // centroid uses pixels within this of the peak (the near-saturated core)
+const CENTROID_R  = 18;                   // px search radius around the brightest pixel
+const MAX_MAP_DIST = 35;                  // if the light lands farther than this from every hole, ignore it
+const SWITCH_FRAMES = 2;                  // a new winner must persist this many frames before the note switches
 
 /* ---------- 2. state ---------- */
 let mode = "idle";                       // idle | baseline | calibrate | play
@@ -359,8 +361,8 @@ async function startCamera() {
     video.srcObject = stream;
     await video.play();
     // Note: no manual exposure lock — locking to "manual" without an exposureTime
-    // blacks the image out instantly on many devices. Auto-exposure is fine for a
-    // stable box; the drift-compensating baseline (EMA_ALPHA) absorbs slow changes.
+    // blacks the image out instantly on many devices. Auto-exposure is fine because the
+    // play detector gates each hole against the frame's OWN background every frame.
     fitPreview();                                   // match canvas + stage to the real frame aspect
     cameraOn = true;
     return true;
@@ -412,25 +414,6 @@ function grabFrame() {
   return pctx.getImageData(0, 0, PW, PH).data;
 }
 function lumaAt(d, p) { const q = p * 4; return (2 * d[q] + 5 * d[q + 1] + d[q + 2]) >> 3; }
-function zoneLuma(d, z) {
-  let sum = 0, n = 0;
-  for (let y = z.y; y < z.y + z.h; y++)
-    for (let x = z.x; x < z.x + z.w; x++) { sum += lumaAt(d, y * PW + x); n++; }
-  return n ? sum / n : 0;
-}
-// Brightness of a zone's brightest PEAK_FRAC pixels (#1). A small, off-centre lit spot
-// spikes this even though it barely moves the flat mean, so tiny holes stop getting missed.
-// `get(p)` reads one pixel: lumaAt(d,·) for a live frame, or baselineFrame[·] for the dark ref.
-function zonePeakBy(z, get) {
-  const vals = [];
-  for (let y = z.y; y < z.y + z.h; y++)
-    for (let x = z.x; x < z.x + z.w; x++) vals.push(get(y * PW + x));
-  vals.sort((a, b) => b - a);
-  const k = Math.max(1, Math.ceil(vals.length * PEAK_FRAC));
-  let sum = 0; for (let i = 0; i < k; i++) sum += vals[i];
-  return sum / k;
-}
-const zonePeak = (d, z) => zonePeakBy(z, p => lumaAt(d, p));
 function frameMeanLuma(d) {
   let sum = 0; const N = PW * PH;
   for (let p = 0; p < N; p++) sum += lumaAt(d, p);
@@ -519,13 +502,7 @@ function calibrationStep(d) {
       const cx = z.x + z.w / 2, cy = z.y + z.h / 2;
       const dup = zones.some(o => cx >= o.x && cx <= o.x + o.w && cy >= o.y && cy <= o.y + o.h);
       if (!dup) {
-        // #2: measure THIS hole's dark and lit peaks (same metric detection uses),
-        // then set its own thresholds from its own swing — dim and bright holes each get tuned.
-        z.dark = zonePeakBy(z, p => baselineFrame[p]);   // dark reference
-        z.lit  = zonePeak(d, z);                          // brightness while pressed right now
-        z.amp  = Math.max(1, z.lit - z.dark);            // this hole's dark->lit swing
-        z.on   = Math.max(MIN_ON, ON_FRAC * z.amp);
-        z.off  = Math.min(OFF_FRAC * z.amp, 0.6 * z.on); // release always below press
+        z.cx = cx; z.cy = cy;                            // hole centre — the play detector maps light to the nearest of these
         zones.push(z);
         keyEls[calIndex].classList.remove("uncal");
         blip(calIndex);
@@ -543,8 +520,9 @@ function enterPlay() {
   setStatus("live", "live");
   setGuide(`Play! Lift the phone out of the box to see which keys were reached.`);
   const d = grabFrame();
-  zones.forEach(z => { z.base = zonePeak(d, z); z.pressed = false; });   // dark baseline, peak metric (#1)
-  darkMean = frameMeanLuma(d);              // brightness reference of the closed, dark box
+  zones.forEach(z => { z.pressed = false; });
+  resetDetection();
+  darkMean = frameMeanLuma(d);              // brightness reference of the closed, dark box (removal detection)
   clearReached();
 }
 
@@ -563,7 +541,9 @@ function clearReached() {
    record, silence everything, and show which keys were reached. */
 function handleRemoval() {
   mode = "removed";
-  zones.forEach(z => { if (z.pressed) noteOff(z.note); z.pressed = false; });
+  if (activeNote >= 0) noteOff(activeNote);
+  resetDetection();
+  zones.forEach(z => { z.pressed = false; });
   keyEls.forEach(k => { k.classList.remove("on"); const f = k.querySelector(".fill"); if (f) f.style.height = "0%"; });
   setStatus("out of box");
   const list = reachedOrder.length ? reachedOrder.map(n => NAMES[n]).join(" → ") : "none";
@@ -745,21 +725,74 @@ function finishRecording() {
 }
 
 /* ---------- 9. play-mode detection ---------- */
+// ASSUMPTION (confirmed against the physical rig): exactly ONE hole is ever lit at a time — a
+// single sliding window uncovers one hole. So instead of testing 5 zones independently, we find
+// the single brightest spot in the frame and map it to the nearest calibrated hole. Measured from
+// real box footage: a lit hole saturates (~255) while the wall is mid-grey (~130) and DRIFTS with
+// auto-exposure. Gating the peak against the frame's OWN background each frame makes this
+// exposure-proof, and taking one brightest blob ignores the glow that bleeds between holes.
+let activeNote = -1;                       // note currently sounding (held), or -1 for silence
+let pendNote = -2, pendCount = 0;          // debounced candidate for the next note switch
+
+function resetDetection() { activeNote = -1; pendNote = -2; pendCount = 0; }
+
 function playStep(d) {
   if (frameMeanLuma(d) > darkMean + REMOVE_DELTA) { handleRemoval(); return; }  // lifted out
+
+  // 1. one pass: background level (mean) + brightest pixel and where it is
+  let sum = 0, mx = 0, mxp = 0;
+  const N = PW * PH;
+  for (let p = 0; p < N; p++) {
+    const v = lumaAt(d, p);
+    sum += v;
+    if (v > mx) { mx = v; mxp = p; }
+  }
+  const bg = sum / N;
+
+  // 2. is a hole actually lit?  Sensitivity (gain) loosens/tightens the gate. Rejects the dim,
+  //    diffuse frames captured while the window is BETWEEN holes (measured max<200 or small gap).
+  const lit = mx >= SAT_FLOOR && (mx - bg) >= GAP_MIN / gain;
+
+  // 3. locate it: centroid of the near-saturated core around the peak, snapped to nearest hole
+  let winner = -1;
+  if (lit && zones.length) {
+    const gx = mxp % PW, gy = (mxp / PW) | 0, thr = mx - PEAK_BAND;
+    let sx = 0, sy = 0, n = 0;
+    for (let y = Math.max(0, gy - CENTROID_R); y <= Math.min(PH - 1, gy + CENTROID_R); y++)
+      for (let x = Math.max(0, gx - CENTROID_R); x <= Math.min(PW - 1, gx + CENTROID_R); x++)
+        if (lumaAt(d, y * PW + x) >= thr) { sx += x; sy += y; n++; }
+    if (n) {
+      const cx = sx / n, cy = sy / n;
+      let best = Infinity;
+      for (const z of zones) {
+        const dx = cx - z.cx, dy = cy - z.cy, dd = dx * dx + dy * dy;
+        if (dd < best) { best = dd; winner = z.note; }
+      }
+      if (best > MAX_MAP_DIST * MAX_MAP_DIST) winner = -1;   // light isn't near any hole
+    }
+  }
+
+  // 4. hold + temporal hysteresis: the active note sustains until a DIFFERENT winner
+  //    (a different hole, or none) has persisted for SWITCH_FRAMES frames.
+  if (winner === activeNote) { pendNote = -2; pendCount = 0; }
+  else {
+    if (winner === pendNote) pendCount++; else { pendNote = winner; pendCount = 1; }
+    if (pendCount >= SWITCH_FRAMES) {
+      if (activeNote >= 0) noteOff(activeNote);
+      activeNote = winner;
+      if (activeNote >= 0) { noteOn(activeNote); recordReached(activeNote); }
+      pendNote = -2; pendCount = 0;
+    }
+  }
+
+  // 5. reflect on the key strip + overlay (only the one active hole lights up)
   for (const z of zones) {
-    const l = zonePeak(d, z);                    // brightest pixels in the zone (#1)
-    z.sig = l - z.base;
-    const s = z.sig * gain;                     // amplified signal — same gain the screen shows
-    if (!z.pressed) {
-      z.base += EMA_ALPHA * (l - z.base);      // drift-compensating baseline, frozen while pressed
-      if (s > z.on)  { z.pressed = true;  noteOn(z.note); recordReached(z.note); }   // per-hole threshold (#2)
-    } else if (s < z.off) { z.pressed = false; noteOff(z.note); }
+    const on = z.note === activeNote;
+    z.pressed = on;
     const k = keyEls[z.note];
     if (k) {
-      k.classList.toggle("on", z.pressed);
-      k.querySelector(".fill").style.height =
-        Math.max(0, Math.min(100, (s / z.on) * 100)) + "%";   // 100% = at this hole's trigger point
+      k.classList.toggle("on", on);
+      k.querySelector(".fill").style.height = on ? "100%" : "0%";
     }
   }
 }
