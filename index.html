@@ -191,8 +191,8 @@
     <div class="row">
       <label for="numKeys">Keys</label>
       <select id="numKeys">
-        <option>3</option><option>4</option><option>5</option><option>6</option>
-        <option>7</option><option>8</option><option selected>10</option>
+        <option>3</option><option>4</option><option selected>5</option><option>6</option>
+        <option>7</option><option>8</option><option>10</option>
       </select>
       <button class="ghost" id="toneBtn" type="button">Test sound</button>
     </div>
@@ -222,12 +222,14 @@ const PEAK_FRAC = 0.15;                  // detection samples the brightest 15% 
 const ON_FRAC   = 0.40;                  // per-hole press at 40% of its own dark->lit swing (#2)
 const OFF_FRAC  = 0.22;                  // per-hole release at 22% (hysteresis)
 const MIN_ON    = 8;                     // noise floor so a barely-lit hole can't be tripped by grain
+const CAL_IDLE_MS = 4000;                // sealed box has no button: auto-finish calibration after this idle gap
 
 /* ---------- 2. state ---------- */
 let mode = "idle";                       // idle | baseline | calibrate | play
-let numKeys = 10;
+let numKeys = 5;
 let zones = [];                          // {x,y,w,h, base, sig, pressed, note, freq, name}
 let calIndex = 0, calHold = 0, calRelease = 0, baseFrames = 0;
+let lastCalHit = 0;                       // timestamp of last hole activity, for hands-free auto-finish
 let baselineFrame = new Float32Array(PW * PH);
 let gain = 1.0;                           // sensitivity = light gain (ISO-style): brightens footage AND scales detection
 let reachedOrder = [];                    // note indices reached this session, in order
@@ -298,6 +300,12 @@ function beepStart() {
   beep(660, 0.1);
   setTimeout(() => beep(990, 0.1), 120);
   setTimeout(() => beep(1320, 0.18), 240);
+}
+// Distinct higher/faster cue: calibration finished, play mode is live — you hear this from inside the box.
+function beepDone() {
+  beep(880, 0.09);
+  setTimeout(() => beep(1320, 0.09), 90);
+  setTimeout(() => beep(1760, 0.18), 180);
 }
 function rebuildVoices() {
   voices.length = 0;
@@ -469,6 +477,7 @@ function calibrationStep(d) {
     if (++baseFrames >= 30) {
       for (let p = 0; p < PW * PH; p++) baselineFrame[p] /= 30;
       mode = "calibrate"; calHold = 0; calRelease = 0;
+      lastCalHit = Date.now();               // start the idle clock for hands-free auto-finish
       setGuide(`Press key <b>1</b> and hold briefly.`);
     }
     return;
@@ -483,6 +492,12 @@ function calibrationStep(d) {
       if (y < miny) miny = y; if (y > maxy) maxy = y;
     }
   }
+  // Hands-free finish: box is sealed, so there's no button. Keep the clock alive while a
+  // hole is lit; once no hole has appeared for CAL_IDLE_MS and we've learned at least one,
+  // enter play automatically. This makes numKeys an upper bound, not an exact requirement.
+  const now = Date.now();
+  if (count >= BLOB_MIN) lastCalHit = now;
+  else if (zones.length && now - lastCalHit > CAL_IDLE_MS) { enterPlay(); return; }
   if (calRelease > 0) {                        // waiting for previous key to close
     if (count < BLOB_MIN / 2 && ++calHold >= 4) {
       calRelease = 0; calHold = 0;
@@ -524,6 +539,7 @@ function calibrationStep(d) {
 }
 function enterPlay() {
   mode = "play";
+  beepDone();                               // audible "now playing" cue — heard from inside the sealed box
   setStatus("live", "live");
   setGuide(`Play! Lift the phone out of the box to see which keys were reached.`);
   const d = grabFrame();
