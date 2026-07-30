@@ -222,8 +222,10 @@
 const PW = 160, PH = 120;               // processing resolution
 const NAMES = ["C4","D4","E4","F4","G4","A4","B4","C5","D5","E5"];
 const FREQS = [261.63,293.66,329.63,349.23,392.00,440.00,493.88,523.25,587.33,659.25];
-const REMOVE_DELTA = 70;                 // whole-frame brightening that means "lifted out of the box" (well above auto-exposure wobble)
-const REMOVE_FRAMES = 6;                  // ...and it must persist this many frames, so an exposure blip can't lock play into "removed"
+const REMOVE_DELTA = 70;                 // removal needs the frame this much brighter than its ADAPTIVE baseline...
+const REMOVE_ABS   = 150;                // ...AND this bright in absolute terms (a real flood of room light), so exposure drift in a dark box can't trip it
+const REMOVE_FRAMES = 8;                  // ...sustained this many frames, so a blip can't lock play into "removed"
+const DARK_EMA     = 0.03;               // the removal baseline slowly follows auto-exposure drift instead of a one-shot capture
 const CAL_IDLE_MS = 4000;                // sealed box has no button: auto-finish calibration after this idle gap
 const PLAY_DELAY_S = 10;                  // after the success clip, wait this long before play mode starts
 // --- play detection (find-the-light-and-name-it), all in the 160x120 processing frame ---
@@ -261,7 +263,7 @@ function setGuide(html) { guideEl.innerHTML = html; }
 function showErr(msg) { errEl.style.display = "block"; errEl.textContent = msg; log("ERROR shown", msg); }
 
 /* ---------- 3b. logging (downloadable text log of the whole flow) ---------- */
-const APP_VERSION = "v18";
+const APP_VERSION = "v19";
 const LOG = [];
 const LOG_MAX = 8000;                     // ring-buffer cap so long sessions can't exhaust memory
 const T0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
@@ -638,7 +640,7 @@ function enterPlay() {
   resetDetection();
   darkMean = frameMeanLuma(d);              // brightness reference of the closed, dark box (removal detection)
   clearReached();
-  log("=== PLAY mode live ===", { holes: zones.length, darkMean: Math.round(darkMean), removalAt: Math.round(darkMean) + REMOVE_DELTA });
+  log("=== PLAY mode live ===", { holes: zones.length, darkMean: Math.round(darkMean), removalNeeds: `>${Math.round(darkMean) + REMOVE_DELTA} AND >${REMOVE_ABS}` });
 }
 
 /* Latch a key as "reached" (persists until the next calibration). */
@@ -906,12 +908,21 @@ function findLight(d) {
 }
 
 function playStep(d) {
-  // Lifted out of the box = a big, SUSTAINED flood of light (not a one-frame auto-exposure wobble).
-  if (frameMeanLuma(d) > darkMean + REMOVE_DELTA) {
-    if (++removeStreak >= REMOVE_FRAMES) { handleRemoval(); return; }
-  } else removeStreak = 0;
-
   const L = findLight(d);
+  const fm = L.bg;                         // whole-frame mean brightness (findLight already computed it)
+
+  // Lifted out of the box = a big, SUSTAINED flood of light: much brighter than the ADAPTIVE
+  // baseline AND bright in absolute terms. Otherwise, let the baseline follow exposure drift so a
+  // dark box that auto-brightens can never trip removal (that was silencing play instantly).
+  if (fm > darkMean + REMOVE_DELTA && fm > REMOVE_ABS) {
+    if (++removeStreak >= REMOVE_FRAMES) {
+      log("removal threshold sustained", { frameMean: Math.round(fm), darkMean: Math.round(darkMean) });
+      handleRemoval(); return;
+    }
+  } else {
+    removeStreak = 0;
+    darkMean += DARK_EMA * (fm - darkMean);   // baseline tracks slow auto-exposure drift inside the box
+  }
 
   // snap the light to the nearest calibrated hole
   let winner = -1;
