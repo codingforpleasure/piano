@@ -6,6 +6,23 @@ This repo is the whole web app (a PWA). Open it on a phone over HTTPS, tap **Sta
 
 ---
 
+## Table of contents
+
+- [How you use it](#how-you-use-it)
+- [The flow at a glance](#the-flow-at-a-glance)
+- [How it works (in plain English)](#how-it-works-in-plain-english)
+  - [What the camera actually sees](#what-the-camera-actually-sees)
+  - [The tricky part: the camera keeps changing the brightness](#the-tricky-part-the-camera-keeps-changing-the-brightness)
+  - ["Find the light, then name it"](#find-the-light-then-name-it)
+  - [Calibration: learning where the holes are](#calibration-learning-where-the-holes-are)
+  - [Keeping notes steady](#keeping-notes-steady)
+  - [The Sensitivity slider](#the-sensitivity-slider)
+  - [The "Show detection" overlay](#the-show-detection-overlay)
+- [Files](#files)
+- [Hosting](#hosting)
+
+---
+
 ## How you use it
 
 1. **Start camera & sound** — pick the camera, grant permission.
@@ -13,6 +30,44 @@ This repo is the whole web app (a PWA). Open it on a phone over HTTPS, tap **Sta
 3. **Play** — uncover holes in any order; each one sounds its own note.
 
 You never need to see the screen — all the cues are audible, because the phone is hidden inside the box.
+
+---
+
+## The flow at a glance
+
+Read it top to bottom. Each box is one step.
+
+```mermaid
+flowchart TD
+    A([Open the web link]) --> B["Tap 'Start camera & sound'"]
+    B --> C[Tap 'Calibrate']
+    C --> D[10-second countdown<br/>Close the phone in the box]
+    D --> E[Slide the window across the holes<br/>one hole at a time]
+    E --> F{Is a new hole lit?}
+    F -- Yes --> G[Save its position<br/>Play its note as a cue]
+    G --> E
+    F -- No light for 4 seconds --> H[Calibration done<br/>Sort holes top-to-bottom = notes]
+    H --> I[Play success sound<br/>then a 10-second countdown]
+    I --> J([PLAY MODE])
+    J --> K[Uncover any hole, any order]
+    K --> L[Find the brightest light<br/>Match it to the nearest hole<br/>Play that hole's note]
+    L --> J
+    J --> M[Lift the phone out of the box]
+    M --> N([See which keys were reached])
+```
+
+**Step by step, in one line each:**
+
+1. **Open** — scan the QR code or open the link. It works offline after the first load.
+2. **Start** — tap *Start camera & sound*. This turns on the camera and the sound.
+3. **Calibrate** — tap *Calibrate*. A 10-second countdown begins.
+4. **Close the box** — put the phone inside and shut it before the countdown ends.
+5. **Sweep** — slowly slide the light window across every hole, one at a time.
+6. **Learn** — for each hole it finds, the app saves its spot and plays its note.
+7. **Finish** — stop sweeping. After 4 quiet seconds, calibration ends by itself.
+8. **Get ready** — a success sound plays, then a 10-second countdown to play mode.
+9. **Play** — uncover holes in any order. Each one plays its own note.
+10. **Done** — lift the phone out to see which keys were reached.
 
 ---
 

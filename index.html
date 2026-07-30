@@ -184,6 +184,9 @@
       <button class="primary" id="calBtn" disabled>Calibrate</button>
       <button class="primary" id="shotBtn" disabled>Take shot</button>
     </div>
+    <div class="btnrow">
+      <button class="ghost" id="logBtn" type="button">Download logs (.txt)</button>
+    </div>
   </div>
 
   <div id="err"></div>
@@ -219,7 +222,8 @@
 const PW = 160, PH = 120;               // processing resolution
 const NAMES = ["C4","D4","E4","F4","G4","A4","B4","C5","D5","E5"];
 const FREQS = [261.63,293.66,329.63,349.23,392.00,440.00,493.88,523.25,587.33,659.25];
-const REMOVE_DELTA = 40;                 // whole-frame brightening that means "lifted out of the box"
+const REMOVE_DELTA = 70;                 // whole-frame brightening that means "lifted out of the box" (well above auto-exposure wobble)
+const REMOVE_FRAMES = 6;                  // ...and it must persist this many frames, so an exposure blip can't lock play into "removed"
 const CAL_IDLE_MS = 4000;                // sealed box has no button: auto-finish calibration after this idle gap
 const PLAY_DELAY_S = 10;                  // after the success clip, wait this long before play mode starts
 // --- play detection (find-the-light-and-name-it), all in the 160x120 processing frame ---
@@ -252,9 +256,46 @@ const video = document.createElement("video");
 video.playsInline = true; video.muted = true;
 const statusEl = $("status"), guideEl = $("guide"), errEl = $("err");
 
-function setStatus(txt, cls) { statusEl.textContent = txt; statusEl.className = cls || ""; }
+function setStatus(txt, cls) { statusEl.textContent = txt; statusEl.className = cls || ""; log("status", { txt, cls: cls || "" }); }
 function setGuide(html) { guideEl.innerHTML = html; }
-function showErr(msg) { errEl.style.display = "block"; errEl.textContent = msg; }
+function showErr(msg) { errEl.style.display = "block"; errEl.textContent = msg; log("ERROR shown", msg); }
+
+/* ---------- 3b. logging (downloadable text log of the whole flow) ---------- */
+const APP_VERSION = "v18";
+const LOG = [];
+const LOG_MAX = 8000;                     // ring-buffer cap so long sessions can't exhaust memory
+const T0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+function nowMs() { return ((typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now()) - T0; }
+function log(msg, data) {
+  const t = (nowMs() / 1000).toFixed(2).padStart(8);
+  let line = `[${t}s] ${msg}`;
+  if (data !== undefined) {
+    try { line += "  " + (typeof data === "object" ? JSON.stringify(data) : String(data)); }
+    catch (_) { line += "  [unserializable]"; }
+  }
+  LOG.push(line);
+  if (LOG.length > LOG_MAX) LOG.shift();
+  if (window.console && console.log) console.log(line);
+}
+function downloadLogs() {
+  const header = [
+    "Optical Piano — session log",
+    "app       : " + APP_VERSION,
+    "generated : " + new Date().toISOString(),
+    "userAgent : " + navigator.userAgent,
+    "screen    : " + screen.width + "x" + screen.height + "  dpr " + (window.devicePixelRatio || 1),
+    "entries   : " + LOG.length,
+    "-".repeat(64)
+  ].join("\n");
+  const text = header + "\n" + LOG.join("\n") + "\n";
+  const blob = new Blob([text], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "optical-piano-log.txt";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  log("logs downloaded", { entries: LOG.length });
+}
 
 /* ---------- 4. audio ---------- */
 let actx = null, master = null;
@@ -265,6 +306,7 @@ function initAudio() {
   master = actx.createGain();
   master.gain.value = 0.5;
   master.connect(actx.destination);
+  log("audio initialised", { sampleRate: actx.sampleRate, state: actx.state });
 }
 function makeVoice(freq) {
   const g = actx.createGain(); g.gain.value = 0; g.connect(master);
@@ -322,14 +364,15 @@ const CAL_SUCCESS_URL = "data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2
 // media channel and plays regardless — same context as the beeps, already unlocked on Start.
 let calBuffer = null, calDecoding = false;
 function decodeCalAudio() {
-  if (!actx || calBuffer || calDecoding) return;
+  if (!actx || calBuffer || calDecoding) { log("decodeCalAudio skipped", { hasAudio: !!actx, decoded: !!calBuffer, decoding: calDecoding }); return; }
   calDecoding = true;
+  log("decoding success clip…");
   const bin = atob(CAL_SUCCESS_URL.split(",")[1]);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   actx.decodeAudioData(bytes.buffer,
-    buf => { calBuffer = buf; calDecoding = false; },
-    () => { calDecoding = false; });          // decode failed → playCalSuccess falls back to beeps
+    buf => { calBuffer = buf; calDecoding = false; log("success clip decoded", { seconds: +buf.duration.toFixed(2) }); },
+    err => { calDecoding = false; log("success clip DECODE FAILED — will use beep fallback", String(err)); });
 }
 function playCalSuccess() {
   if (actx && calBuffer) {
@@ -338,13 +381,16 @@ function playCalSuccess() {
     const g = actx.createGain(); g.gain.value = 0.9;
     src.connect(g); g.connect(actx.destination);
     src.start();
+    log("playing success clip (Web Audio)", { seconds: +calBuffer.duration.toFixed(2) });
     return;
   }
+  log("success clip not ready — beep fallback", { hasAudio: !!actx, decoded: !!calBuffer });
   beepDone();                                  // not decoded yet / unavailable → audible fallback
 }
 function rebuildVoices() {
   voices.length = 0;
   for (let i = 0; i < numKeys; i++) voices.push(makeVoice(FREQS[i]));
+  log("voices rebuilt", { numKeys });
 }
 
 /* ---------- 5. key strip ---------- */
@@ -376,6 +422,7 @@ function fitPreview() {
   if (!w || !h) return;
   view.width = w; view.height = h;
   $("stage").style.aspectRatio = `${w} / ${h}`;
+  log("preview fitted to camera frame", { w, h });
 }
 async function startCamera() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -385,6 +432,7 @@ async function startCamera() {
   try {
     stopStream();                                  // release any current camera before switching
     const sel = $("facing").value;
+    log("startCamera requested", { selection: sel });
     // "environment"/"user" → pick by facing; anything else is a specific deviceId (e.g. ultra-wide).
     const base = { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } };
     const videoConstraints = (sel === "environment" || sel === "user")
@@ -398,8 +446,11 @@ async function startCamera() {
     // play detector gates each hole against the frame's OWN background every frame.
     fitPreview();                                   // match canvas + stage to the real frame aspect
     cameraOn = true;
+    const tr = stream.getVideoTracks()[0], s = tr ? tr.getSettings() : {};
+    log("camera started", { label: tr && tr.label, w: s.width, h: s.height, fps: s.frameRate });
     return true;
   } catch (e) {
+    log("startCamera FAILED", String(e && e.message || e));
     showErr("Camera permission denied or unavailable: " + e.message);
     return false;
   }
@@ -413,6 +464,7 @@ async function detectCameras() {
     note.textContent = "Camera list not available in this browser."; return;
   }
   note.textContent = "Scanning cameras…";
+  log("detectCameras: scanning");
   try {
     let devices = await navigator.mediaDevices.enumerateDevices();
     if (!devices.some(d => d.kind === "videoinput" && d.label)) {
@@ -421,6 +473,7 @@ async function detectCameras() {
       devices = await navigator.mediaDevices.enumerateDevices();
     }
     const cams = devices.filter(d => d.kind === "videoinput");
+    log("cameras enumerated", { count: cams.length, labels: cams.map(c => c.label) });
     const uw = cams.find(d => /ultra|wide|0[.,]5/i.test(d.label) && !/tele|zoom|front|user/i.test(d.label));
     const old = $("uwOpt"); if (old) old.remove();
     if (uw) {
@@ -437,9 +490,13 @@ async function detectCameras() {
   }
 }
 async function keepAwake() {
-  try { if ("wakeLock" in navigator) await navigator.wakeLock.request("screen"); } catch (_) {}
+  try { if ("wakeLock" in navigator) { await navigator.wakeLock.request("screen"); log("wake lock acquired"); } }
+  catch (e) { log("wake lock failed", String(e && e.message || e)); }
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden) keepAwake(); });
+document.addEventListener("visibilitychange", () => {
+  log("visibility changed", { hidden: document.hidden, audioState: actx && actx.state });
+  if (!document.hidden) keepAwake();
+});
 
 /* ---------- 7. pixel helpers ---------- */
 function grabFrame() {
@@ -463,6 +520,7 @@ function startCalibration() {
   setStatus("calibrating", "cal");
   keyEls.forEach(k => k.className = "key uncal");
   setGuide("Sweep the window slowly across <b>all</b> the holes…");
+  log("=== CALIBRATION started (sweep mode) ===", { expectHoles: numKeys });
 }
 
 /* Auto-calibrate countdown: gives you time to close the phone in the box. */
@@ -473,6 +531,7 @@ function cancelCountdown() {
 function startCountdown(secs = 10) {
   cancelCountdown();
   cancelPlayCountdown();                    // drop any pending success→play grace from a prior run
+  log("pre-calibration countdown started", { seconds: secs });
   let left = secs;
   const tick = () => {
     setGuide(`Close the phone in the box — calibrating in <b>${left}</b>s…`);
@@ -511,11 +570,13 @@ function calibrationStep(d) {
     } else {                                          // a new hole
       clusters.push({ cx: L.cx, cy: L.cy, hits: 1 });
       blip(Math.min(clusters.length - 1, numKeys - 1), 0.16);   // play THIS hole's note as it's found
+      log("calibration: NEW hole found", { index: clusters.length - 1, x: Math.round(L.cx), y: Math.round(L.cy), mx: L.mx, gap: Math.round(L.mx - L.bg) });
     }
     lastCalHit = now;
     const solid = clusters.filter(c => c.hits >= CAL_MIN_HITS).length;
     setGuide(`Sweeping… found <b>${solid}</b> hole${solid === 1 ? "" : "s"} so far.`);
   } else if (clusters.some(c => c.hits >= CAL_MIN_HITS) && now - lastCalHit > CAL_IDLE_MS) {
+    log("calibration idle → finalising", { clusters: clusters.length });
     finalizeCalibration();
   }
 
@@ -536,6 +597,7 @@ function finalizeCalibration() {
   }));
   keyEls.forEach(k => k.classList.add("uncal"));
   zones.forEach(z => keyEls[z.note]?.classList.remove("uncal"));
+  log("=== CALIBRATION done ===", { holes: zones.length, notes: zones.map(z => ({ note: NAMES[z.note], x: Math.round(z.cx), y: Math.round(z.cy) })) });
 
   // Success! Hold in "ready" (no notes trigger yet). Play the clip and, starting at the SAME
   // moment, run the 10s grace; play mode begins 10s after the clip starts.
@@ -544,6 +606,7 @@ function finalizeCalibration() {
   // confirm the mapping by ear under the clip: each hole's note in order, low → high
   zones.forEach((z, i) => setTimeout(() => blip(z.note, 0.18), 400 + i * 220));
   playCalSuccess();
+  log("success clip + 10s grace started");
   startPlayCountdown(PLAY_DELAY_S);           // 10s counted from the clip start
 }
 
@@ -575,6 +638,7 @@ function enterPlay() {
   resetDetection();
   darkMean = frameMeanLuma(d);              // brightness reference of the closed, dark box (removal detection)
   clearReached();
+  log("=== PLAY mode live ===", { holes: zones.length, darkMean: Math.round(darkMean), removalAt: Math.round(darkMean) + REMOVE_DELTA });
 }
 
 /* Latch a key as "reached" (persists until the next calibration). */
@@ -582,6 +646,7 @@ function recordReached(note) {
   if (reachedOrder.includes(note)) return;
   reachedOrder.push(note);
   keyEls[note]?.classList.add("hit");
+  log("key reached (first time)", { note: NAMES[note], order: reachedOrder.length });
 }
 function clearReached() {
   reachedOrder = [];
@@ -591,6 +656,7 @@ function clearReached() {
 /* Phone lifted out of the box: freeze so the flood of light can't overwrite the
    record, silence everything, and show which keys were reached. */
 function handleRemoval() {
+  log("REMOVAL detected — leaving play mode", { reached: reachedOrder.map(n => NAMES[n]) });
   mode = "removed";
   if (activeNote >= 0) noteOff(activeNote);
   resetDetection();
@@ -622,6 +688,7 @@ function resetGallery(title) {
 }
 
 function startCapture() {
+  log("diagnostic capture started", { photos: CAP_SECONDS, seconds: CAP_SECONDS });
   resetGallery(`CAPTURE — ${CAP_SECONDS} photos + footage`);
   capShots = 0;
   captureFrame();                                  // first photo at t=0
@@ -636,6 +703,7 @@ function startCapture() {
 
 // Single photo (used by the "Take shot" button).
 function takeShot() {
+  log("single shot captured");
   resetGallery("SINGLE SHOT");
   captureFrame();
 }
@@ -681,7 +749,8 @@ function captureFrame() {
 /* Save every captured photo as one .zip (store method — JPEGs are already compressed).
    Built by hand so there's no external dependency and it works offline. */
 function saveAllPhotos() {
-  if (!photos.length) return;
+  if (!photos.length) { log("save photos: none to save"); return; }
+  log("saving photos zip", { count: photos.length });
   const blob = new Blob([buildZip(photos)], { type: "application/zip" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -747,13 +816,14 @@ function buildZip(files) {
 function startRecording() {
   recChunks = [];
   const stream = video.srcObject;
-  if (!stream || typeof MediaRecorder === "undefined") return;   // video is best-effort
+  if (!stream || typeof MediaRecorder === "undefined") { log("recording unavailable (no MediaRecorder/stream)"); return; }   // video is best-effort
   try {
     recorder = new MediaRecorder(stream, pickMime());
     recorder.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
     recorder.onstop = finishRecording;
     recorder.start();
-  } catch (_) { recorder = null; }
+    log("recording started", pickMime());
+  } catch (e) { recorder = null; log("recording failed to start", String(e)); }
 }
 function pickMime() {
   const types = ["video/mp4", "video/webm;codecs=vp9", "video/webm"];
@@ -762,7 +832,8 @@ function pickMime() {
 }
 function stopRecording() { if (recorder && recorder.state !== "inactive") recorder.stop(); }
 function finishRecording() {
-  if (!recChunks.length) return;
+  if (!recChunks.length) { log("recording finished with no data"); return; }
+  log("recording finished", { chunks: recChunks.length });
   const blob = new Blob(recChunks, { type: recChunks[0].type || "video/webm" });
   const url = URL.createObjectURL(blob);
   const ext = blob.type.includes("mp4") ? "mp4" : "webm";
@@ -785,7 +856,8 @@ function finishRecording() {
 let activeNote = -1;                       // note currently sounding (held), or -1 for silence
 let pendNote = -2, pendCount = 0;          // debounced candidate for the next note switch
 
-function resetDetection() { activeNote = -1; pendNote = -2; pendCount = 0; }
+let removeStreak = 0;
+function resetDetection() { activeNote = -1; pendNote = -2; pendCount = 0; removeStreak = 0; }
 
 // Live binarization overlay (screen-only diagnostic — never recorded): shows exactly which
 // pixels pass the "lit" threshold, plus the centroid and chosen hole.
@@ -834,7 +906,10 @@ function findLight(d) {
 }
 
 function playStep(d) {
-  if (frameMeanLuma(d) > darkMean + REMOVE_DELTA) { handleRemoval(); return; }  // lifted out
+  // Lifted out of the box = a big, SUSTAINED flood of light (not a one-frame auto-exposure wobble).
+  if (frameMeanLuma(d) > darkMean + REMOVE_DELTA) {
+    if (++removeStreak >= REMOVE_FRAMES) { handleRemoval(); return; }
+  } else removeStreak = 0;
 
   const L = findLight(d);
 
@@ -856,9 +931,12 @@ function playStep(d) {
   else {
     if (winner === pendNote) pendCount++; else { pendNote = winner; pendCount = 1; }
     if (pendCount >= SWITCH_FRAMES) {
+      const prev = activeNote;
       if (activeNote >= 0) noteOff(activeNote);
       activeNote = winner;
       if (activeNote >= 0) { noteOn(activeNote); recordReached(activeNote); }
+      log("play: note " + (winner >= 0 ? "ON " + NAMES[winner] : "OFF (silence)"),
+          { from: prev >= 0 ? NAMES[prev] : "-", gap: Math.round(L.mx - L.bg), mx: L.mx });
       pendNote = -2; pendCount = 0;
     }
   }
@@ -923,18 +1001,21 @@ function loop() {
 
 /* ---------- 12. wiring ---------- */
 $("startBtn").addEventListener("click", async () => {
+  log("Start tapped — initialising audio + camera");
   initAudio();
   await actx.resume();
+  log("audio context resumed", { state: actx.state, sampleRate: actx.sampleRate });
   rebuildVoices();
   decodeCalAudio();                          // pre-decode the success clip so it's ready at calibration
   const ok = await startCamera();
-  if (!ok) return;
+  if (!ok) { log("start aborted — camera failed"); return; }
   $("prompt").style.display = "none";
   $("calBtn").disabled = false;
   $("shotBtn").disabled = false;
   keepAwake();
   setStatus("camera on");
   setGuide(`Tap <b>Calibrate</b> to start the 10-second countdown, then close the box.`);
+  log("main loop starting");
   loop();
 });
 document.querySelectorAll("#tabs .tab").forEach(btn => {
@@ -947,6 +1028,7 @@ document.querySelectorAll("#tabs .tab").forEach(btn => {
 });
 $("detectBtn").addEventListener("click", detectCameras);
 $("facing").addEventListener("change", async () => {
+  log("camera selection changed", { value: $("facing").value, cameraOn });
   if (!cameraOn) return;                            // not started yet — Start will use the selection
   errEl.style.display = "none";
   const ok = await startCamera();                   // swap the live camera
@@ -957,14 +1039,16 @@ $("facing").addEventListener("change", async () => {
   setStatus("camera on");
   setGuide(`Camera switched — tap <b>Calibrate</b> to set it up.`);
 });
-$("calBtn").addEventListener("click", () => { decodeCalAudio(); startCountdown(10); });   // countdown → auto-calibrates at 0
-$("shotBtn").addEventListener("click", () => startShotCountdown(5)); // 5s countdown → single photo
+$("calBtn").addEventListener("click", () => { log("Calibrate tapped"); decodeCalAudio(); startCountdown(10); });   // countdown → auto-calibrates at 0
+$("shotBtn").addEventListener("click", () => { log("Take shot tapped"); startShotCountdown(5); }); // 5s countdown → single photo
 $("toneBtn").addEventListener("click", () => {
+  log("Test sound tapped", { hasAudio: !!actx });
   if (!actx) return;
   [0, 2, 4].forEach((n, j) => setTimeout(() => blip(Math.min(n, numKeys - 1), 0.2), j * 160));
 });
 $("numKeys").addEventListener("change", e => {
   numKeys = +e.target.value;
+  log("key count changed", { numKeys });
   buildKeyStrip();
   if (actx) rebuildVoices();
   zones = [];
@@ -981,16 +1065,22 @@ $("sens").addEventListener("input", e => {
   // so what the user sees getting brighter is exactly what makes notes easier to trigger.
   gain = +e.target.value / 30;
   $("sensOut").textContent = gain.toFixed(2) + "×";
+  log("sensitivity changed", { slider: +e.target.value, gain: +gain.toFixed(2) });
 });
 $("dbgChk").addEventListener("change", e => {
   showDetect = e.target.checked;
+  log("detection overlay toggled", { showDetect });
   if (!showDetect) $("dbgOut").textContent = "—";
 });
+$("logBtn").addEventListener("click", downloadLogs);
 
 buildKeyStrip();
+log("app loaded", { version: APP_VERSION, numKeys });
 
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("./sw.js").catch(() => {});
+  navigator.serviceWorker.register("./sw.js")
+    .then(() => log("service worker registered"))
+    .catch(err => log("service worker registration failed", String(err)));
 }
 </script>
 </body>
