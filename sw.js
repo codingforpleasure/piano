@@ -1,4 +1,4 @@
-const CACHE = "optical-piano-v20";
+const CACHE = "optical-piano-v21";
 const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./icon-180.png"];
 
 self.addEventListener("install", e => {

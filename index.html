@@ -176,6 +176,10 @@
       <output id="sensOut">1.00×</output>
     </div>
     <div class="row">
+      <label for="coverChk">Play note only when covering the hole</label>
+      <input type="checkbox" id="coverChk">
+    </div>
+    <div class="row">
       <label for="dbgChk">Show detection</label>
       <input type="checkbox" id="dbgChk" checked>
       <output id="dbgOut">—</output>
@@ -235,6 +239,7 @@ const PEAK_BAND   = 35;                   // centroid uses pixels within this of
 const CENTROID_R  = 18;                   // px search radius around the brightest pixel
 const MAX_MAP_DIST = 35;                  // if the light lands farther than this from every hole, ignore it
 const SWITCH_FRAMES = 2;                  // a new winner must persist this many frames before the note switches
+const DARK_CEIL   = 130;                  // cover mode: a covered hole's darkest pixel must be at most this (plus clear the gap)
 const CLUSTER_R   = 12;                   // calibration: centroids within this many px are the same hole
 const CAL_MIN_HITS = 2;                   // calibration: a hole must be seen this many frames to count (rejects noise)
 
@@ -246,6 +251,7 @@ let clusters = [];                        // calibration: running {cx,cy,hits} p
 let lastCalHit = 0;                       // timestamp of last hole activity, for hands-free auto-finish
 let playTimer = null;                     // countdown from calibration-success to play mode
 let gain = 1.0;                           // sensitivity = light gain (ISO-style): brightens footage AND scales detection
+let coverMode = false;                     // false = play when a hole is UNCOVERED (lit); true = play when COVERED (dark)
 let reachedOrder = [];                    // note indices reached this session, in order
 let darkMean = 0;                         // mean frame luma inside the closed box (removal reference)
 
@@ -263,7 +269,7 @@ function setGuide(html) { guideEl.innerHTML = html; }
 function showErr(msg) { errEl.style.display = "block"; errEl.textContent = msg; log("ERROR shown", msg); }
 
 /* ---------- 3b. logging (downloadable text log of the whole flow) ---------- */
-const APP_VERSION = "v20";
+const APP_VERSION = "v21";
 const LOG = [];
 const LOG_MAX = 8000;                     // ring-buffer cap so long sessions can't exhaust memory
 const T0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
@@ -869,22 +875,30 @@ const dbgCtx = dbgCanvas.getContext("2d");
 const dbgImg = dbgCtx.createImageData(PW, PH);
 let dbg = { lit: false, cx: -1, cy: -1, winner: -1, mx: 0, bg: 0 };
 
-function buildDetectOverlay(d, mx, bg, lit, cx, cy, winner) {
-  const data = dbgImg.data, thr = mx - PEAK_BAND, N = PW * PH;
+// L = a detector result from findLight/findDark. In cover mode (L.dark) the core is the DARK
+// blocked hole (drawn blue); otherwise it's the bright lit hole (drawn red).
+function buildDetectOverlay(d, L, winner) {
+  const data = dbgImg.data, N = PW * PH;
   for (let p = 0; p < N; p++) {
-    const q = p * 4, on = lit && lumaAt(d, p) >= thr;   // the near-saturated core the detector binarizes
-    data[q] = 255; data[q + 1] = 40; data[q + 2] = 40; data[q + 3] = on ? 210 : 0;
+    const q = p * 4, v = lumaAt(d, p);
+    const on = L.lit && (L.dark ? v <= L.coreThr : v >= L.coreThr);
+    data[q]     = L.dark ? 60  : 255;
+    data[q + 1] = L.dark ? 130 : 40;
+    data[q + 2] = L.dark ? 255 : 40;
+    data[q + 3] = on ? 210 : 0;
   }
   dbgCtx.putImageData(dbgImg, 0, 0);
-  dbg.lit = lit; dbg.cx = cx; dbg.cy = cy; dbg.winner = winner; dbg.mx = mx; dbg.bg = Math.round(bg);
-  $("dbgOut").textContent = lit
-    ? `lit • gap ${Math.round(mx - bg)} • ${winner >= 0 ? NAMES[winner] : "no hole"}`
-    : `silence • max ${mx}`;
+  dbg.lit = L.lit; dbg.cx = L.cx; dbg.cy = L.cy; dbg.winner = winner; dbg.mx = L.mx; dbg.bg = Math.round(L.bg);
+  const gap = L.dark ? Math.round(L.bg - L.mx) : Math.round(L.mx - L.bg);
+  $("dbgOut").textContent = L.lit
+    ? `${L.dark ? "covered" : "lit"} • gap ${gap} • ${winner >= 0 ? NAMES[winner] : "no hole"}`
+    : `${L.dark ? "no cover" : "silence"} • ${L.dark ? "min " + L.mx : "max " + L.mx}`;
 }
 
-// Shared by calibration and play: find the single brightest lit spot and its centroid.
-// Returns {mx, bg, lit, cx, cy}. `lit` is gated against the frame's OWN background so it
-// survives auto-exposure drift; cx/cy are -1 when nothing qualifies.
+// UNCOVER mode: find the single brightest LIT spot and its centroid. Used by calibration always,
+// and by play when the "cover to play" checkbox is off. `lit` is gated against the frame's OWN
+// background so it survives auto-exposure drift; cx/cy are -1 when nothing qualifies.
+// Return shape is shared with findDark: {mx (the peak value), bg, lit, cx, cy, coreThr, dark}.
 function findLight(d) {
   let sum = 0, mx = 0, mxp = 0;
   const N = PW * PH;
@@ -895,21 +909,51 @@ function findLight(d) {
   }
   const bg = sum / N;
   const gated = mx >= SAT_FLOOR && (mx - bg) >= GAP_MIN / gain;
+  const thr = mx - PEAK_BAND;
   let cx = -1, cy = -1;
   if (gated) {
-    const gx = mxp % PW, gy = (mxp / PW) | 0, thr = mx - PEAK_BAND;
+    const gx = mxp % PW, gy = (mxp / PW) | 0;
     let sx = 0, sy = 0, n = 0;
     for (let y = Math.max(0, gy - CENTROID_R); y <= Math.min(PH - 1, gy + CENTROID_R); y++)
       for (let x = Math.max(0, gx - CENTROID_R); x <= Math.min(PW - 1, gx + CENTROID_R); x++)
         if (lumaAt(d, y * PW + x) >= thr) { sx += x; sy += y; n++; }
     if (n) { cx = sx / n; cy = sy / n; }
   }
-  return { mx, bg, lit: gated && cx >= 0, cx, cy };
+  return { mx, bg, lit: gated && cx >= 0, cx, cy, coreThr: thr, dark: false };
+}
+
+// COVER mode: the mirror image — find the single DARKEST spot (a hole whose light was just
+// blocked) against a bright background. Same gap test (background vs the dark spot), so it's
+// exposure-robust too. `mx` here carries the MIN value for a shared return shape.
+function findDark(d) {
+  let sum = 0, mn = 255, mnp = 0;
+  const N = PW * PH;
+  for (let p = 0; p < N; p++) {
+    const v = lumaAt(d, p);
+    sum += v;
+    if (v < mn) { mn = v; mnp = p; }
+  }
+  const bg = sum / N;
+  const gated = mn <= DARK_CEIL && (bg - mn) >= GAP_MIN / gain;
+  const thr = mn + PEAK_BAND;
+  let cx = -1, cy = -1;
+  if (gated) {
+    const gx = mnp % PW, gy = (mnp / PW) | 0;
+    let sx = 0, sy = 0, n = 0;
+    for (let y = Math.max(0, gy - CENTROID_R); y <= Math.min(PH - 1, gy + CENTROID_R); y++)
+      for (let x = Math.max(0, gx - CENTROID_R); x <= Math.min(PW - 1, gx + CENTROID_R); x++)
+        if (lumaAt(d, y * PW + x) <= thr) { sx += x; sy += y; n++; }
+    if (n) { cx = sx / n; cy = sy / n; }
+  }
+  return { mx: mn, bg, lit: gated && cx >= 0, cx, cy, coreThr: thr, dark: true };
 }
 
 function playStep(d) {
-  const L = findLight(d);
-  const fm = L.bg;                         // whole-frame mean brightness (findLight already computed it)
+  // Cover mode (checkbox on): a hole plays when it's COVERED (goes dark). Otherwise the default:
+  // a hole plays when it's UNCOVERED (lit). Same nearest-hole mapping either way.
+  const L = coverMode ? findDark(d) : findLight(d);
+  const gap = L.dark ? (L.bg - L.mx) : (L.mx - L.bg);   // contrast, positive in both modes
+  const fm = L.bg;                         // whole-frame mean brightness (detector already computed it)
   darkMean += DARK_EMA * (fm - darkMean);  // keep tracking exposure for diagnostics
 
   // NOTE: automatic removal is DISABLED. In a dark box, auto-exposure amplifies the whole frame to
@@ -927,12 +971,12 @@ function playStep(d) {
     }
     if (best > MAX_MAP_DIST * MAX_MAP_DIST) winner = -1;   // light isn't near any hole
   }
-  if (showDetect) buildDetectOverlay(d, L.mx, L.bg, L.lit, L.cx, L.cy, winner);
+  if (showDetect) buildDetectOverlay(d, L, winner);
 
   // Throttled diagnostic (~once per second): what the detector actually sees in play mode.
-  // 'gap' is the contrast a lit hole has over the background; it must clear GAP_MIN (95/gain) to fire.
+  // 'gap' is the contrast the active hole has vs the background; it must clear GAP_MIN (95/gain) to fire.
   if ((++playLogFrame % 30) === 0) {
-    log("play tick", { mx: L.mx, bg: Math.round(L.bg), gap: Math.round(L.mx - L.bg), needGap: Math.round(GAP_MIN / gain), lit: L.lit, winner: winner >= 0 ? NAMES[winner] : "-" });
+    log("play tick", { mode: coverMode ? "cover" : "uncover", peak: L.mx, bg: Math.round(L.bg), gap: Math.round(gap), needGap: Math.round(GAP_MIN / gain), active: L.lit, winner: winner >= 0 ? NAMES[winner] : "-" });
   }
 
   // hold + temporal hysteresis: the active note sustains until a DIFFERENT winner
@@ -946,7 +990,7 @@ function playStep(d) {
       activeNote = winner;
       if (activeNote >= 0) { noteOn(activeNote); recordReached(activeNote); }
       log("play: note " + (winner >= 0 ? "ON " + NAMES[winner] : "OFF (silence)"),
-          { from: prev >= 0 ? NAMES[prev] : "-", gap: Math.round(L.mx - L.bg), mx: L.mx });
+          { mode: coverMode ? "cover" : "uncover", from: prev >= 0 ? NAMES[prev] : "-", gap: Math.round(gap) });
       pendNote = -2; pendCount = 0;
     }
   }
@@ -1081,6 +1125,10 @@ $("dbgChk").addEventListener("change", e => {
   showDetect = e.target.checked;
   log("detection overlay toggled", { showDetect });
   if (!showDetect) $("dbgOut").textContent = "—";
+});
+$("coverChk").addEventListener("change", e => {
+  coverMode = e.target.checked;
+  log("play trigger mode changed", { mode: coverMode ? "cover to play" : "uncover to play" });
 });
 $("logBtn").addEventListener("click", downloadLogs);
 
