@@ -263,7 +263,7 @@ function setGuide(html) { guideEl.innerHTML = html; }
 function showErr(msg) { errEl.style.display = "block"; errEl.textContent = msg; log("ERROR shown", msg); }
 
 /* ---------- 3b. logging (downloadable text log of the whole flow) ---------- */
-const APP_VERSION = "v19";
+const APP_VERSION = "v20";
 const LOG = [];
 const LOG_MAX = 8000;                     // ring-buffer cap so long sessions can't exhaust memory
 const T0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
@@ -858,8 +858,8 @@ function finishRecording() {
 let activeNote = -1;                       // note currently sounding (held), or -1 for silence
 let pendNote = -2, pendCount = 0;          // debounced candidate for the next note switch
 
-let removeStreak = 0;
-function resetDetection() { activeNote = -1; pendNote = -2; pendCount = 0; removeStreak = 0; }
+let removeStreak = 0, playLogFrame = 0;
+function resetDetection() { activeNote = -1; pendNote = -2; pendCount = 0; removeStreak = 0; playLogFrame = 0; }
 
 // Live binarization overlay (screen-only diagnostic — never recorded): shows exactly which
 // pixels pass the "lit" threshold, plus the centroid and chosen hole.
@@ -910,19 +910,12 @@ function findLight(d) {
 function playStep(d) {
   const L = findLight(d);
   const fm = L.bg;                         // whole-frame mean brightness (findLight already computed it)
+  darkMean += DARK_EMA * (fm - darkMean);  // keep tracking exposure for diagnostics
 
-  // Lifted out of the box = a big, SUSTAINED flood of light: much brighter than the ADAPTIVE
-  // baseline AND bright in absolute terms. Otherwise, let the baseline follow exposure drift so a
-  // dark box that auto-brightens can never trip removal (that was silencing play instantly).
-  if (fm > darkMean + REMOVE_DELTA && fm > REMOVE_ABS) {
-    if (++removeStreak >= REMOVE_FRAMES) {
-      log("removal threshold sustained", { frameMean: Math.round(fm), darkMean: Math.round(darkMean) });
-      handleRemoval(); return;
-    }
-  } else {
-    removeStreak = 0;
-    darkMean += DARK_EMA * (fm - darkMean);   // baseline tracks slow auto-exposure drift inside the box
-  }
+  // NOTE: automatic removal is DISABLED. In a dark box, auto-exposure amplifies the whole frame to
+  // ~220 (near-white), which is indistinguishable from "lifted out" by brightness alone — it kept
+  // killing play. Whole-frame brightness can't tell the two apart, so we don't auto-switch anymore.
+  // (Tap Calibrate to reset / review reached keys.)
 
   // snap the light to the nearest calibrated hole
   let winner = -1;
@@ -935,6 +928,12 @@ function playStep(d) {
     if (best > MAX_MAP_DIST * MAX_MAP_DIST) winner = -1;   // light isn't near any hole
   }
   if (showDetect) buildDetectOverlay(d, L.mx, L.bg, L.lit, L.cx, L.cy, winner);
+
+  // Throttled diagnostic (~once per second): what the detector actually sees in play mode.
+  // 'gap' is the contrast a lit hole has over the background; it must clear GAP_MIN (95/gain) to fire.
+  if ((++playLogFrame % 30) === 0) {
+    log("play tick", { mx: L.mx, bg: Math.round(L.bg), gap: Math.round(L.mx - L.bg), needGap: Math.round(GAP_MIN / gain), lit: L.lit, winner: winner >= 0 ? NAMES[winner] : "-" });
+  }
 
   // hold + temporal hysteresis: the active note sustains until a DIFFERENT winner
   //    (a different hole, or none) has persisted for SWITCH_FRAMES frames.
