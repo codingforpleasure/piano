@@ -178,8 +178,8 @@
     <div class="row">
       <label for="soundSet">Sound</label>
       <select id="soundSet">
+        <option value="xylophone" selected>Xylophone</option>
         <option value="default">Default (synth)</option>
-        <option value="xylophone">Xylophone</option>
       </select>
     </div>
     <div class="row">
@@ -259,7 +259,7 @@ let lastCalHit = 0;                       // timestamp of last hole activity, fo
 let playTimer = null;                     // countdown from calibration-success to play mode
 let gain = 1.0;                           // sensitivity = light gain (ISO-style): brightens footage AND scales detection
 let coverMode = false;                     // false = play when a hole is UNCOVERED (lit); true = play when COVERED (dark)
-let soundset = "default";                   // "default" = synth voices; "xylophone" = embedded samples
+let soundset = "xylophone";                 // "default" = synth voices; "xylophone" = embedded samples
 let reachedOrder = [];                    // note indices reached this session, in order
 let darkMean = 0;                         // mean frame luma inside the closed box (removal reference)
 
@@ -277,7 +277,7 @@ function setGuide(html) { guideEl.innerHTML = html; }
 function showErr(msg) { errEl.style.display = "block"; errEl.textContent = msg; log("ERROR shown", msg); }
 
 /* ---------- 3b. logging (downloadable text log of the whole flow) ---------- */
-const APP_VERSION = "v23";
+const APP_VERSION = "v24";
 const LOG = [];
 const LOG_MAX = 8000;                     // ring-buffer cap so long sessions can't exhaust memory
 const T0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
