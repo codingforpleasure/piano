@@ -152,15 +152,10 @@
     <div class="row">
       <label for="facing">Camera</label>
       <select id="facing">
-        <option value="environment">Back camera</option>
-        <option value="user" selected>Front camera</option>
+        <option value="environment" selected>Back camera</option>
+        <option value="user">Front camera</option>
       </select>
       <button class="ghost" id="detectBtn" type="button">List all cameras</button>
-    </div>
-    <div class="row" id="zoomRow" hidden>
-      <label for="zoom">Zoom</label>
-      <input type="range" id="zoom">
-      <output id="zoomOut"></output>
     </div>
     <div id="camNote" class="camNote"></div>
   </div>
@@ -282,7 +277,7 @@ function setGuide(html) { guideEl.innerHTML = html; }
 function showErr(msg) { errEl.style.display = "block"; errEl.textContent = msg; log("ERROR shown", msg); }
 
 /* ---------- 3b. logging (downloadable text log of the whole flow) ---------- */
-const APP_VERSION = "v28";
+const APP_VERSION = "v30";
 const LOG = [];
 const LOG_MAX = 8000;                     // ring-buffer cap so long sessions can't exhaust memory
 const T0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
@@ -473,7 +468,6 @@ function buildKeyStrip() {
 
 /* ---------- 6. camera ---------- */
 let cameraOn = false;
-let curTrack = null;                        // active video track, for zoom/applyConstraints
 function stopStream() {
   const s = video.srcObject;
   if (s) s.getTracks().forEach(t => t.stop());
@@ -510,31 +504,25 @@ async function startCamera() {
     fitPreview();                                   // match canvas + stage to the real frame aspect
     cameraOn = true;
     const tr = stream.getVideoTracks()[0], s = tr ? tr.getSettings() : {};
-    curTrack = tr;
-    log("camera started", { label: tr && tr.label, w: s.width, h: s.height, fps: s.frameRate });
-    // Zoom capability: on Android the logical back camera often reaches the ultra-wide at zoom < 1.
-    const cap = tr && tr.getCapabilities ? tr.getCapabilities() : {};
-    const z = cap && cap.zoom;
-    const zr = $("zoomRow"), zi = $("zoom");
+    log("camera started", { label: tr && tr.label, w: s.width, h: s.height, fps: s.frameRate, facingMode: s.facingMode || "?" });
+    // On Android the ultra-wide is reached by zooming the logical back camera below 1x. If the
+    // camera supports sub-1x zoom, drop straight to its minimum (0.5x/0.6x) = ultra-wide lens.
+    const z = (tr && tr.getCapabilities) ? tr.getCapabilities().zoom : null;
+    log("zoom capability", z ? { min: z.min, max: z.max, step: z.step, currentZoom: s.zoom } : "none — zoom not supported on this camera");
     let engagedWide = false;
-    if (z && z.max > z.min) {
-      zi.min = z.min; zi.max = z.max; zi.step = z.step || 0.1;
-      // Default to the widest zoom (< 1x) so it starts on the ULTRA-WIDE lens automatically.
-      const target = (z.min < 1) ? z.min : (s.zoom != null ? s.zoom : Math.min(1, z.max));
-      if (z.min < 1) {
-        try { await tr.applyConstraints({ advanced: [{ zoom: target }] }); engagedWide = true; log("ultra-wide engaged by default", { zoom: target }); }
-        catch (err) { log("default ultra-wide zoom failed", String(err && err.message || err)); }
-      }
-      zi.value = target; $("zoomOut").textContent = (+target).toFixed(1) + "×";
-      zr.hidden = false;
+    if (z && z.min < 1) {
+      try {
+        await tr.applyConstraints({ advanced: [{ zoom: z.min }] });
+        engagedWide = true;
+        log("ultra-wide engaged", { requested: z.min, nowZoom: tr.getSettings().zoom });
+      } catch (err) { log("ultra-wide zoom REJECTED by device", String(err && err.message || err)); }
     } else {
-      zr.hidden = true;
+      log("ultra-wide not reachable", { reason: z ? "min zoom >= 1 (" + z.min + ")" : "no zoom capability" });
     }
-    const wideHint = engagedWide
-      ? ` <b>Ultra-wide engaged</b> at ${z.min}× — use the <b>Zoom</b> slider to change.`
-      : (z && z.min < 1) ? ` Reaches ${z.min}× — slide <b>Zoom</b> down for ultra-wide.`
-      : ` No sub-1× zoom, so the ultra-wide lens isn't reachable in the browser here.`;
-    $("camNote").innerHTML = `Active: <b>${(tr && tr.label) || "camera"}</b> · ${s.width || "?"}×${s.height || "?"}.` + wideHint;
+    $("camNote").innerHTML = `Active: <b>${(tr && tr.label) || "camera"}</b> · ${s.width || "?"}×${s.height || "?"}.` +
+      (engagedWide ? ` <b>Ultra-wide engaged</b> at ${z.min}×.`
+        : (z && z.min < 1) ? ` Reaches ${z.min}× but zoom was rejected.`
+        : ` No sub-1× zoom on this camera.`);
     return true;
   } catch (e) {
     log("startCamera FAILED", String(e && e.message || e));
@@ -1179,13 +1167,6 @@ document.querySelectorAll("#tabs .tab").forEach(btn => {
   });
 });
 $("detectBtn").addEventListener("click", detectCameras);
-$("zoom").addEventListener("input", async e => {
-  if (!curTrack) return;
-  const z = +e.target.value;
-  $("zoomOut").textContent = z.toFixed(1) + "×";
-  try { await curTrack.applyConstraints({ advanced: [{ zoom: z }] }); log("zoom applied", { zoom: z }); }
-  catch (err) { log("zoom failed", String(err && err.message || err)); }
-});
 $("facing").addEventListener("change", async () => {
   log("camera selection changed", { value: $("facing").value, cameraOn });
   if (!cameraOn) return;                            // not started yet — Start will use the selection
