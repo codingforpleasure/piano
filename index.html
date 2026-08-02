@@ -155,7 +155,7 @@
         <option value="environment">Back camera</option>
         <option value="user" selected>Front camera</option>
       </select>
-      <button class="ghost" id="detectBtn" type="button">Detect ultra-wide</button>
+      <button class="ghost" id="detectBtn" type="button">List all cameras</button>
     </div>
     <div id="camNote" class="camNote"></div>
   </div>
@@ -277,7 +277,7 @@ function setGuide(html) { guideEl.innerHTML = html; }
 function showErr(msg) { errEl.style.display = "block"; errEl.textContent = msg; log("ERROR shown", msg); }
 
 /* ---------- 3b. logging (downloadable text log of the whole flow) ---------- */
-const APP_VERSION = "v24";
+const APP_VERSION = "v26";
 const LOG = [];
 const LOG_MAX = 8000;                     // ring-buffer cap so long sessions can't exhaust memory
 const T0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
@@ -505,6 +505,11 @@ async function startCamera() {
     cameraOn = true;
     const tr = stream.getVideoTracks()[0], s = tr ? tr.getSettings() : {};
     log("camera started", { label: tr && tr.label, w: s.width, h: s.height, fps: s.frameRate });
+    // Live readout so you can identify each lens while hunting the ultra-wide.
+    const cap = tr && tr.getCapabilities ? tr.getCapabilities() : {};
+    const zoomTxt = (cap && cap.zoom) ? ` · zoom ${cap.zoom.min}–${cap.zoom.max}` : "";
+    $("camNote").innerHTML = `Active: <b>${(tr && tr.label) || "camera"}</b> · ${s.width || "?"}×${s.height || "?"}${zoomTxt}. ` +
+      `Switch cameras and keep the one showing the <b>widest</b> view.`;
     return true;
   } catch (e) {
     log("startCamera FAILED", String(e && e.message || e));
@@ -531,16 +536,30 @@ async function detectCameras() {
     }
     const cams = devices.filter(d => d.kind === "videoinput");
     log("cameras enumerated", { count: cams.length, labels: cams.map(c => c.label) });
-    const uw = cams.find(d => /ultra|wide|0[.,]5/i.test(d.label) && !/tele|zoom|front|user/i.test(d.label));
-    const old = $("uwOpt"); if (old) old.remove();
-    if (uw) {
+
+    // List EVERY camera by deviceId. On Android, facingMode:"environment" only ever returns the
+    // MAIN back lens — the ultra-wide is reachable only by its specific deviceId — and the labels
+    // are generic ("camera N, facing back"), so we can't auto-pick it. Expose them all and let the
+    // user choose the widest "facing back" one.
+    const sel = $("facing");
+    sel.querySelectorAll("option.devOpt").forEach(o => o.remove());   // clear any previous scan
+    let backCount = 0;
+    cams.forEach((cam, i) => {
+      const label = cam.label || `Camera ${i + 1}`;
+      if (/back|environment/i.test(label)) backCount++;
       const o = document.createElement("option");
-      o.id = "uwOpt"; o.value = uw.deviceId; o.textContent = "Ultra-wide camera";
-      $("facing").appendChild(o);
-      $("facing").value = uw.deviceId;
-      note.textContent = `Ultra-wide found — selected. (${cams.length} cameras total)`;
+      o.className = "devOpt"; o.value = cam.deviceId; o.textContent = label;
+      sel.appendChild(o);
+    });
+
+    // If a label actually names the ultra-wide (iOS does: "Back Ultra Wide Camera"), auto-select it.
+    const uw = cams.find(d => /ultra|0[.,]5/i.test(d.label) && !/tele|zoom|front|user/i.test(d.label));
+    if (uw) {
+      sel.value = uw.deviceId;
+      sel.dispatchEvent(new Event("change"));        // switch live if the camera is already running
+      note.innerHTML = `Ultra-wide found and selected. (${cams.length} cameras listed)`;
     } else {
-      note.textContent = `No ultra-wide detected (${cams.length} camera${cams.length === 1 ? "" : "s"}). Some phones/iOS don't expose it to the browser.`;
+      note.innerHTML = `Listed <b>${cams.length}</b> camera${cams.length === 1 ? "" : "s"} (${backCount} back). Android hides lens names, so open each <b>"facing back"</b> entry and keep the one with the <b>widest</b> view — that's the ultra-wide.`;
     }
   } catch (e) {
     note.textContent = "Couldn't list cameras: " + e.message;
